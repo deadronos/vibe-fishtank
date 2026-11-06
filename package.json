@@ -1,0 +1,22 @@
+{
+  "name": "vibe-fishtank",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src",
+    "fmt": "oxfmt src",
+    "fmt:check": "oxfmt --check src",
+    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check"
+  },
+  "devDependencies": {
+    "oxfmt": "0.77.0",
+    "oxlint": "1.92.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.6"
+  }
+}

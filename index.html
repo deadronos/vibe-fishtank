@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05090c" />
+    <meta name="description" content="A planted aquarium rendered in raw WebGL2." />
+    <title>Vibe Fishtank</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="tank" aria-label="An aquarium with schooling fish, plants and bubbles. Click the water to drop food."></canvas>
+
+    <header class="plate">
+      <h1>Vibe Fishtank</h1>
+      <p id="census"></p>
+    </header>
+
+    <div class="controls" role="toolbar" aria-label="Tank controls">
+      <button id="feed" type="button" aria-keyshortcuts="f">Feed <kbd>F</kbd></button>
+      <button id="tap" type="button" aria-keyshortcuts="t">Tap glass <kbd>T</kbd></button>
+      <button id="light" type="button" aria-keyshortcuts="l" aria-pressed="false">Moonlight <kbd>L</kbd></button>
+    </div>
+
+    <p id="hint" class="hint">Drag to look around · Scroll to zoom · Click the water to drop food</p>
+    <p id="error" class="error" hidden></p>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
