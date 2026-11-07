@@ -1,11 +1,22 @@
 /** Billboards for suspended specks, the aerator's bubble stream, and food flakes. */
 
 import { MeshBuilder } from "../lib/geometry";
-import { Mesh, Program } from "../lib/gl";
+import type { Device, Mesh, Pipeline } from "../lib/gpu/types";
 import { mix, type Floats, type Vec3 } from "../lib/math";
 import { createRng, type Rng } from "../lib/noise";
 import type { Food } from "../sim/school";
-import { bindWaterSamplers, FRAME_GLSL, TANK, WATER_GLSL, type Drawable } from "./common";
+import {
+  FRAME_GLSL,
+  FRAME_WGSL,
+  scenePipeline,
+  shader,
+  TANK,
+  WATER_GLSL,
+  WATER_WGSL,
+  type DrawContext,
+  type Drawable,
+  type SceneTargets,
+} from "./common";
 import { sandHeight } from "./layout";
 
 const KIND_DUST = 0;
@@ -16,14 +27,16 @@ const VS = `${FRAME_GLSL}
 layout(location = 0) in vec3 aPos;
 layout(location = 4) in vec4 iPosSize;
 layout(location = 5) in vec2 iKindSeed;
-uniform vec3 uRight;
-uniform vec3 uUp;
+layout(std140) uniform Params {
+  vec4 uRight;
+  vec4 uUp;
+};
 out vec2 vUv; out vec3 vP; flat out int vKind; out float vSeed;
 void main() {
   vUv = aPos.xy;
   vKind = int(iKindSeed.x + 0.5);
   vSeed = iKindSeed.y;
-  vec3 world = iPosSize.xyz + (uRight * aPos.x + uUp * aPos.y) * iPosSize.w;
+  vec3 world = iPosSize.xyz + (uRight.xyz * aPos.x + uUp.xyz * aPos.y) * iPosSize.w;
   vP = world;
   gl_Position = uViewProj * vec4(world, 1.0);
 }`;
@@ -61,6 +74,64 @@ void main() {
   outColor = vec4(col * alpha, alpha);
 }`;
 
+const WGSL = `${FRAME_WGSL}${WATER_WGSL}
+struct Params { right: vec4f, up: vec4f }
+@group(1) @binding(0) var<uniform> params: Params;
+
+struct VIn { @location(0) pos: vec3f, @location(4) posSize: vec4f, @location(5) kindSeed: vec2f }
+struct VOut {
+  @builtin(position) clip: vec4f,
+  @location(0) uv: vec2f,
+  @location(1) p: vec3f,
+  @location(2) @interpolate(flat) kind: i32,
+  @location(3) seed: f32,
+}
+
+@vertex fn vs(v: VIn) -> VOut {
+  var o: VOut;
+  o.uv = v.pos.xy;
+  o.kind = i32(v.kindSeed.x + 0.5);
+  o.seed = v.kindSeed.y;
+  let world = v.posSize.xyz + (params.right.xyz * v.pos.x + params.up.xyz * v.pos.y) * v.posSize.w;
+  o.p = world;
+  o.clip = project(world);
+  return o;
+}
+
+@fragment fn fs(v: VOut) -> @location(0) vec4f {
+  let r2 = dot(v.uv, v.uv);
+  if (r2 > 1.0) { discard; }
+  let r = sqrt(r2);
+  let atten = exp(-max(WATER_Y - v.p.y, 0.0) * ABSORB);
+  var col: vec3f;
+  var alpha: f32;
+  if (v.kind == ${KIND_DUST}) {
+    let a = pow(1.0 - r2, 2.0);
+    let s = sin(frame.time * 0.8 + v.seed * 40.0);
+    let glint = 0.35 + 0.65 * s * s;
+    col = frame.lightCol * atten * (0.14 + causticAt(v.p) * 0.5) + frame.scatterCol * 1.5;
+    alpha = a * 0.38 * glint;
+  } else if (v.kind == ${KIND_BUBBLE}) {
+    let rim = pow(r, 3.5);
+    let h = v.uv - vec2f(-0.34, 0.38);
+    let spark = exp(-dot(h, h) * 42.0);
+    let b = v.uv - vec2f(0.25, -0.5);
+    let under = exp(-dot(b, b) * 24.0) * 0.35;
+    col = frame.lightCol * atten * (rim * 0.5 + spark * 1.8 + under) + frame.scatterCol * (1.2 * rim + 0.2);
+    alpha = clamp(rim * 0.62 + spark + under + 0.05, 0.0, 1.0);
+  } else {
+    let n = vec3f(v.uv, sqrt(1.0 - r2));
+    let diffuse = 0.45 + 0.55 * max(dot(n, normalize(vec3f(0.2, 0.9, 0.4))), 0.0);
+    let tone = mix(vec3f(0.76, 0.28, 0.08), vec3f(0.88, 0.62, 0.2), fract(v.seed * 13.7));
+    col = tone * diffuse * (frame.lightCol * atten * 0.55 + frame.scatterCol * 2.0);
+    alpha = 1.0 - smoothstep(0.82, 1.0, r);
+  }
+  col = applyWater(col, v.p);
+  return vec4f(col * alpha, alpha);
+}`;
+
+const INSTANCE_LAYOUT = [4, 2];
+
 interface Speck {
   x: number;
   y: number;
@@ -85,9 +156,9 @@ const FLOATS_PER = 6;
 const AERATOR: Vec3 = [1.26, 0, -0.5];
 
 export class Particles implements Drawable {
-  private readonly gl: WebGL2RenderingContext;
-  private readonly program: Program;
+  private readonly pipeline: Pipeline;
   private readonly mesh: Mesh;
+  private readonly params: Floats = new Float32Array(8);
   private readonly data: Floats = new Float32Array(
     (DUST_COUNT + MAX_BUBBLES + MAX_FOOD) * FLOATS_PER,
   );
@@ -99,13 +170,17 @@ export class Particles implements Drawable {
   private right: Vec3 = [1, 0, 0];
   private up: Vec3 = [0, 1, 0];
 
-  constructor(gl: WebGL2RenderingContext) {
-    this.gl = gl;
-    this.program = new Program(gl, VS, FS);
-    bindWaterSamplers(this.program);
+  constructor(device: Device, targets: SceneTargets) {
+    // Premultiplied, so dim specks can add light without darkening what's behind them.
+    this.pipeline = scenePipeline(device, targets, "particles", shader(VS, FS, WGSL), {
+      instances: INSTANCE_LAYOUT,
+      params: 32,
+      depth: "test",
+      blend: "premultiplied",
+    });
     const builder = new MeshBuilder();
     builder.quad([-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0], [0, 0, 1]);
-    this.mesh = new Mesh(gl, builder.build()).instanced([4, 2]);
+    this.mesh = device.createMesh(builder.build(), INSTANCE_LAYOUT);
     for (let i = 0; i < DUST_COUNT; i++) {
       this.specks.push({
         x: mix(-TANK.halfX, TANK.halfX, this.rng()),
@@ -188,15 +263,14 @@ export class Particles implements Drawable {
     this.mesh.setInstances(data, count);
   }
 
-  draw(shadowPass: boolean): void {
-    if (shadowPass) return;
-    const { gl, right, up } = this;
-    this.program
-      .use()
-      .vec3("uRight", right[0], right[1], right[2])
-      .vec3("uUp", up[0], up[1], up[2]);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    this.mesh.draw();
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  draw({ device, pass, frame, water, shadow }: DrawContext): void {
+    if (shadow) return;
+    const { params, right, up } = this;
+    params.set([right[0], right[1], right[2], 0, up[0], up[1], up[2], 0]);
+    pass.draw(this.pipeline, this.mesh, {
+      frame,
+      params: device.uniforms(params),
+      textures: water,
+    });
   }
 }

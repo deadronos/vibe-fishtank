@@ -1,15 +1,21 @@
 /** The substrate: a height field, plus a skirt showing the sand's cross-section through the glass. */
 
 import { MeshBuilder } from "../lib/geometry";
-import { Mesh, Program } from "../lib/gl";
+import type { Device, Mesh, Pipeline } from "../lib/gpu/types";
 import { mix, normalize } from "../lib/math";
 import {
-  bindWaterSamplers,
   FRAME_GLSL,
+  FRAME_WGSL,
   NOISE_GLSL,
+  NOISE_WGSL,
+  scenePipeline,
+  shader,
   TANK,
   WATER_GLSL,
+  WATER_WGSL,
+  type DrawContext,
   type Drawable,
+  type SceneTargets,
 } from "./common";
 import { sandHeight, stoneClearance } from "./layout";
 
@@ -51,13 +57,58 @@ void main() {
   outColor = vec4(applyWater(col, P), 1.0);
 }`;
 
+const WGSL = `${FRAME_WGSL}${NOISE_WGSL}${WATER_WGSL}
+struct VIn { @location(0) pos: vec3f, @location(1) normal: vec3f, @location(3) ao: f32 }
+struct VOut {
+  @builtin(position) clip: vec4f,
+  @location(0) p: vec3f,
+  @location(1) n: vec3f,
+  @location(2) ao: f32,
+}
+
+@vertex fn vs(v: VIn) -> VOut {
+  var o: VOut;
+  o.p = v.pos;
+  o.n = v.normal;
+  o.ao = v.ao;
+  o.clip = project(v.pos);
+  return o;
+}
+
+@fragment fn fs(v: VOut) -> @location(0) vec4f {
+  let P = v.p;
+  var N = normalize(v.n);
+  let skirt = N.y < 0.2;
+  let broad = vnoise(P * 5.0);
+  let grain = hash13(floor(P * 340.0));
+  var albedo = mix(vec3f(0.44, 0.35, 0.24), vec3f(0.62, 0.52, 0.37), broad);
+  albedo *= 0.88 + 0.22 * grain;
+  if (grain > 0.965) {
+    albedo *= 0.42;
+  } else if (grain < 0.03) {
+    albedo = mix(albedo, vec3f(0.86, 0.5, 0.28), 0.6);
+  }
+  if (skirt) {
+    let strata = vnoise(vec3f(P.x * 7.0, P.y * 46.0, P.z * 7.0));
+    albedo *= 0.36 + 0.26 * strata;
+    N = normalize(N + vec3f(0.0, 0.5, 0.0));
+  } else {
+    let e = 0.02;
+    let ripples = vnoise(vec3f(P.x * 16.0, 0.0, P.z * 42.0 + sin(P.x * 3.0)));
+    let rx = vnoise(vec3f((P.x + e) * 16.0, 0.0, P.z * 42.0 + sin(P.x * 3.0))) - ripples;
+    let rz = vnoise(vec3f(P.x * 16.0, 0.0, (P.z + e) * 42.0 + sin(P.x * 3.0))) - ripples;
+    N = normalize(N - vec3f(rx, 0.0, rz) * 0.55);
+  }
+  let col = shade(albedo * v.ao, N, P, 12.0, 0.015, 0.0);
+  return vec4f(applyWater(col, P), 1.0);
+}`;
+
 export class Sand implements Drawable {
-  private readonly program: Program;
+  private readonly pipeline: Pipeline;
   private readonly mesh: Mesh;
 
-  constructor(gl: WebGL2RenderingContext) {
-    this.program = new Program(gl, VS, FS);
-    bindWaterSamplers(this.program);
+  constructor(device: Device, targets: SceneTargets) {
+    this.pipeline = scenePipeline(device, targets, "sand", shader(VS, FS, WGSL));
 
     const builder = new MeshBuilder();
     const inset = 0.002;
@@ -109,12 +160,11 @@ export class Sand implements Drawable {
       1,
       0,
     );
-    this.mesh = new Mesh(gl, builder.build());
+    this.mesh = device.createMesh(builder.build());
   }
 
-  draw(shadowPass: boolean): void {
-    if (shadowPass) return;
-    this.program.use();
-    this.mesh.draw();
+  draw({ pass, frame, water, shadow }: DrawContext): void {
+    if (shadow) return;
+    pass.draw(this.pipeline, this.mesh, { frame, textures: water });
   }
 }

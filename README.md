@@ -1,8 +1,17 @@
 # Vibe Fishtank
 
-A planted aquarium rendered in raw WebGL2. There's no 3D engine: the small graphics library in
-`src/lib` and everything built on it are written by hand, and every model and texture is generated
-in code.
+A planted aquarium rendered in raw WebGPU, or WebGL2 where WebGPU isn't available. There's no 3D
+engine: the small graphics library in `src/lib` and everything built on it are written by hand, and
+every model and texture is generated in code.
+
+## Renderers
+
+The page uses WebGPU when the browser has it, and falls back to WebGL2 otherwise. It also falls back
+if WebGPU starts but any of its shaders or pipelines fail to validate. The renderer in use and the
+GPU are shown under the title; hover over them for the details and the reason for any fallback.
+
+Add `?renderer=webgl2` or `?renderer=webgpu` to the address to pick one. The other one is still
+tried if the one you pick can't start.
 
 ## Run it
 
@@ -57,16 +66,25 @@ gh api -X POST repos/deadronos/vibe-fishtank/environments/github-pages/deploymen
 
 ## How it's put together
 
-- `src/lib`: math, seeded noise, WebGL2 wrappers (programs, instanced meshes, render targets) and a
-  procedural mesh builder.
+- `src/lib/gpu`: a small, WebGPU-shaped rendering interface (meshes, textures, pipelines, passes
+  and per-frame uniforms) with two backends.
+  - `webgpu.ts` records each frame into one command encoder, packs uniforms into one buffer
+    bound at dynamic offsets, and builds its own mip chains.
+  - `webgl2.ts` runs the same calls immediately, with cached framebuffers and blit-based MSAA
+    resolve.
+  - `index.ts` picks between them and falls back on failure.
+- `src/lib`: also math, seeded noise and a procedural mesh builder.
 - `src/sim/school.ts`: per-species boids, with walls, obstacles, food and startles.
-- `src/scene`: the aquascape and its materials.
+- `src/scene`: the aquascape and its materials. Each material carries its shaders in GLSL and
+  WGSL.
   - `common.ts` holds the shared lighting: Beer-Lambert absorption and in-scatter along each view
-    ray, plus caustics and shadow lookups.
+    ray, plus caustics and shadow lookups. It also absorbs WebGPU's differences: its 0 to 1 clip
+    depth and its top-down texture rows.
   - `fish.ts` lofts bodies and fins from a parameter table, swims them in the vertex shader, and
     paints each species' pattern in the fragment shader.
   - `post.ts` resolves 4x MSAA, ray-marches light shafts at half resolution, then applies bloom and
-    ACES tone mapping.
+    ACES tone mapping. WebGPU can't resolve depth, so there the shafts read the multisampled depth
+    buffer directly.
 
 Each frame renders the caustic texture, then the shadow map, then the HDR scene, then post. If the
 frame rate stays low, the render resolution steps down automatically.

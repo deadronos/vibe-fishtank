@@ -1,6 +1,6 @@
 /** Procedural mesh construction. */
 
-import type { Geometry } from "./gl";
+import type { Geometry } from "./gpu/types";
 import { cross, length, normalize, sub, type Vec3 } from "./math";
 
 export interface GridVertex {
