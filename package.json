@@ -11,7 +11,10 @@
     "lint": "oxlint src",
     "fmt": "oxfmt src",
     "fmt:check": "oxfmt --check src",
-    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check"
+    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check",
+    "preversion": "pnpm check",
+    "release": "pnpm version -m 'Release v%s'",
+    "postversion": "git push --follow-tags"
   },
   "devDependencies": {
     "oxfmt": "0.77.0",

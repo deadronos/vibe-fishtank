@@ -14,6 +14,36 @@ pnpm dev
 `pnpm build` typechecks and produces a static site in `dist/`. `pnpm check` runs the typecheck,
 oxlint and oxfmt. The only dependencies are dev tools: TypeScript 7, Vite, oxlint and oxfmt.
 
+## Release
+
+Every `v*` tag deploys the site to GitHub Pages. On a clean, up-to-date `main`, run one of:
+
+```bash
+pnpm release patch
+```
+
+```bash
+pnpm release minor
+```
+
+```bash
+pnpm release major
+```
+
+This runs `pnpm check`, bumps `package.json`, commits, creates the matching `v*` tag, and pushes the
+commit and tag. The deploy fails if a tag doesn't match the version in `package.json`.
+
+The repository needs this setup once. It turns on Pages, then allows `v*` tags to deploy, which the
+`github-pages` environment doesn't permit by default:
+
+```bash
+gh api -X POST repos/deadronos/vibe-fishtank/pages -f build_type=workflow
+```
+
+```bash
+gh api -X POST repos/deadronos/vibe-fishtank/environments/github-pages/deployment-branch-policies -f name='v*' -f type=tag
+```
+
 ## Controls
 
 | Input                  | Action                       |
