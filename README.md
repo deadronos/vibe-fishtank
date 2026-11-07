@@ -21,7 +21,38 @@ pnpm dev
 ```
 
 `pnpm build` typechecks and produces a static site in `dist/`. `pnpm check` runs the typecheck,
-oxlint and oxfmt. The only dependencies are dev tools: TypeScript 7, Vite, oxlint and oxfmt.
+oxlint, oxfmt and the tests with coverage. The only dependencies are dev tools: TypeScript 7, Vite,
+Vitest, oxlint and oxfmt.
+
+## Tests
+
+```bash
+pnpm test
+```
+
+```bash
+pnpm test:watch
+```
+
+```bash
+pnpm coverage
+```
+
+Unit tests sit next to the code they cover, as `*.test.ts`, and run in Node. They cover everything
+that doesn't need a GPU:
+
+- the math, noise and mesh builders, for properties such as matrix inverses, outward winding and
+  noise ranges;
+- the fish simulation, which runs for simulated seconds and checks that fish stay in the water,
+  school, eat and scatter;
+- the camera, the aquascape layout, and how a renderer is chosen and falls back, with both backends
+  mocked.
+
+`pnpm coverage` writes an HTML report to `coverage/` and fails below 90% of lines. The two device
+backends, the scene materials and `main.ts` are left out of coverage, because they need a real GPU.
+Check those in the browser with both `?renderer=webgpu` and `?renderer=webgl2`.
+
+CI runs `pnpm check` and `pnpm build` on every push to `main` and on every pull request.
 
 ## Release
 

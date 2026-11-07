@@ -9,17 +9,22 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
-    "fmt": "oxfmt src",
-    "fmt:check": "oxfmt --check src",
-    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check",
+    "fmt": "oxfmt src vite.config.ts vitest.config.ts",
+    "fmt:check": "oxfmt --check src vite.config.ts vitest.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "check": "pnpm typecheck && pnpm lint && pnpm fmt:check && pnpm coverage",
     "preversion": "pnpm check",
     "release": "pnpm version -m 'Release v%s'",
     "postversion": "git push --follow-tags"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "5.1.0",
     "oxfmt": "0.77.0",
     "oxlint": "1.92.0",
     "typescript": "7.0.2",
-    "vite": "8.3.6"
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
   }
 }
