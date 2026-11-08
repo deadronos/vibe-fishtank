@@ -1,17 +1,23 @@
 /** Hardscape: craggy stones, pebbles and a branching piece of driftwood, baked into one mesh. */
 
 import { icosphere, MeshBuilder } from "../lib/geometry";
-import { Mesh, Program } from "../lib/gl";
+import type { Device, Mesh, Pipeline } from "../lib/gpu/types";
 import { mix, type Vec3 } from "../lib/math";
 import { createRng, fbm3 } from "../lib/noise";
 import {
-  bindWaterSamplers,
   FRAME_GLSL,
+  FRAME_WGSL,
   NOISE_GLSL,
-  SHADOW_FS,
+  NOISE_WGSL,
+  scenePipeline,
+  shader,
+  shadowPipeline,
   TANK,
   WATER_GLSL,
+  WATER_WGSL,
+  type DrawContext,
   type Drawable,
+  type SceneTargets,
 } from "./common";
 import { DRIFTWOOD, sandHeight, STONES, stoneClearance } from "./layout";
 
@@ -59,9 +65,56 @@ void main() {
   outColor = vec4(applyWater(col, P), 1.0);
 }`;
 
-const SHADOW_VS = `${FRAME_GLSL}
-layout(location = 0) in vec3 aPos;
-void main() { gl_Position = uViewProj * vec4(aPos, 1.0); }`;
+const WGSL = `${FRAME_WGSL}${NOISE_WGSL}${WATER_WGSL}
+struct VIn {
+  @location(0) pos: vec3f,
+  @location(1) normal: vec3f,
+  @location(2) uv: vec2f,
+  @location(3) kind: f32,
+}
+struct VOut {
+  @builtin(position) clip: vec4f,
+  @location(0) p: vec3f,
+  @location(1) n: vec3f,
+  @location(2) uv: vec2f,
+  @location(3) kind: f32,
+}
+
+@vertex fn vs(v: VIn) -> VOut {
+  var o: VOut;
+  o.p = v.pos;
+  o.n = v.normal;
+  o.uv = v.uv;
+  o.kind = v.kind;
+  o.clip = project(v.pos);
+  return o;
+}
+
+@fragment fn fs(v: VOut) -> @location(0) vec4f {
+  var N = normalize(v.n);
+  let P = v.p;
+  var albedo: vec3f;
+  var spec = 0.08;
+  if (v.kind < 0.5) {
+    let layers = vnoise(vec3f(P.x * 5.0, P.y * 26.0 + P.x * 3.0, P.z * 5.0));
+    let fine = vnoise(P * 44.0);
+    albedo = mix(vec3f(0.07, 0.07, 0.075), vec3f(0.3, 0.27, 0.235), layers * 0.65 + fine * 0.35);
+    let moss = smoothstep(0.55, 0.92, N.y + (vnoise(P * 15.0) - 0.5) * 0.9);
+    albedo = mix(albedo, vec3f(0.2, 0.36, 0.1) * (0.6 + fine * 0.8), moss * 0.85);
+    N = normalize(N + (vec3f(vnoise(P * 60.0), vnoise(P.zxy * 60.0), vnoise(P.yzx * 60.0)) - 0.5) * 0.28);
+  } else if (v.kind < 1.5) {
+    let grain = vnoise(vec3f(v.uv.x * 18.0, v.uv.y * 5.0, 3.0));
+    let streak = vnoise(vec3f(v.uv.x * 60.0, v.uv.y * 9.0, 8.0));
+    albedo = mix(vec3f(0.09, 0.055, 0.03), vec3f(0.34, 0.22, 0.12), grain * 0.55 + streak * 0.45);
+    N = normalize(N + (vec3f(streak, grain, streak * grain) - 0.5) * 0.35);
+  } else {
+    let tone = hash13(floor(P * 11.0));
+    albedo = mix(vec3f(0.3, 0.27, 0.24), vec3f(0.72, 0.64, 0.52), tone);
+    spec = 0.2;
+  }
+  let col = shade(albedo, N, P, 22.0, spec, 0.0);
+  return vec4f(applyWater(col, P), 1.0);
+}`;
 
 function addStone(
   builder: MeshBuilder,
@@ -114,14 +167,14 @@ function catmull(points: readonly Vec3[], subdivisions: number): Vec3[] {
 }
 
 export class Decor implements Drawable {
-  private readonly program: Program;
-  private readonly shadow: Program;
+  private readonly pipeline: Pipeline;
+  private readonly shadow: Pipeline;
   private readonly mesh: Mesh;
 
-  constructor(gl: WebGL2RenderingContext) {
-    this.program = new Program(gl, VS, FS);
-    this.shadow = new Program(gl, SHADOW_VS, SHADOW_FS);
-    bindWaterSamplers(this.program);
+  constructor(device: Device, targets: SceneTargets) {
+    const source = shader(VS, FS, WGSL);
+    this.pipeline = scenePipeline(device, targets, "decor", source);
+    this.shadow = shadowPipeline(device, "decor", source);
 
     const builder = new MeshBuilder();
     const rock = icosphere(4);
@@ -158,11 +211,10 @@ export class Decor implements Drawable {
       builder.smooth(positions, pebble.indices, PEBBLE);
     }
 
-    this.mesh = new Mesh(gl, builder.build());
+    this.mesh = device.createMesh(builder.build());
   }
 
-  draw(shadowPass: boolean): void {
-    (shadowPass ? this.shadow : this.program).use();
-    this.mesh.draw();
+  draw({ pass, frame, water, shadow }: DrawContext): void {
+    pass.draw(shadow ? this.shadow : this.pipeline, this.mesh, { frame, textures: water });
   }
 }

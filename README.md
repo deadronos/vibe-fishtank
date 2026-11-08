@@ -1,8 +1,17 @@
 # Vibe Fishtank
 
-A planted aquarium rendered in raw WebGL2. There's no 3D engine: the small graphics library in
-`src/lib` and everything built on it are written by hand, and every model and texture is generated
-in code.
+A planted aquarium rendered in raw WebGPU, or WebGL2 where WebGPU isn't available. There's no 3D
+engine: the small graphics library in `src/lib` and everything built on it are written by hand, and
+every model and texture is generated in code.
+
+## Renderers
+
+The page uses WebGPU when the browser has it, and falls back to WebGL2 otherwise. It also falls back
+if WebGPU starts but any of its shaders or pipelines fail to validate. The renderer in use and the
+GPU are shown under the title; hover over them for the details and the reason for any fallback.
+
+Add `?renderer=webgl2` or `?renderer=webgpu` to the address to pick one. The other one is still
+tried if the one you pick can't start.
 
 ## Run it
 
@@ -12,7 +21,38 @@ pnpm dev
 ```
 
 `pnpm build` typechecks and produces a static site in `dist/`. `pnpm check` runs the typecheck,
-oxlint and oxfmt. The only dependencies are dev tools: TypeScript 7, Vite, oxlint and oxfmt.
+oxlint, oxfmt and the tests with coverage. The only dependencies are dev tools: TypeScript 7, Vite,
+Vitest, oxlint and oxfmt.
+
+## Tests
+
+```bash
+pnpm test
+```
+
+```bash
+pnpm test:watch
+```
+
+```bash
+pnpm coverage
+```
+
+Unit tests sit next to the code they cover, as `*.test.ts`, and run in Node. They cover everything
+that doesn't need a GPU:
+
+- the math, noise and mesh builders, for properties such as matrix inverses, outward winding and
+  noise ranges;
+- the fish simulation, which runs for simulated seconds and checks that fish stay in the water,
+  school, eat and scatter;
+- the camera, the aquascape layout, and how a renderer is chosen and falls back, with both backends
+  mocked.
+
+`pnpm coverage` writes an HTML report to `coverage/` and fails below 90% of lines. The two device
+backends, the scene materials and `main.ts` are left out of coverage, because they need a real GPU.
+Check those in the browser with both `?renderer=webgpu` and `?renderer=webgl2`.
+
+CI runs `pnpm check` and `pnpm build` on every push to `main` and on every pull request.
 
 ## Release
 
@@ -57,16 +97,25 @@ gh api -X POST repos/deadronos/vibe-fishtank/environments/github-pages/deploymen
 
 ## How it's put together
 
-- `src/lib`: math, seeded noise, WebGL2 wrappers (programs, instanced meshes, render targets) and a
-  procedural mesh builder.
+- `src/lib/gpu`: a small, WebGPU-shaped rendering interface (meshes, textures, pipelines, passes
+  and per-frame uniforms) with two backends.
+  - `webgpu.ts` records each frame into one command encoder, packs uniforms into one buffer
+    bound at dynamic offsets, and builds its own mip chains.
+  - `webgl2.ts` runs the same calls immediately, with cached framebuffers and blit-based MSAA
+    resolve.
+  - `index.ts` picks between them and falls back on failure.
+- `src/lib`: also math, seeded noise and a procedural mesh builder.
 - `src/sim/school.ts`: per-species boids, with walls, obstacles, food and startles.
-- `src/scene`: the aquascape and its materials.
+- `src/scene`: the aquascape and its materials. Each material carries its shaders in GLSL and
+  WGSL.
   - `common.ts` holds the shared lighting: Beer-Lambert absorption and in-scatter along each view
-    ray, plus caustics and shadow lookups.
+    ray, plus caustics and shadow lookups. It also absorbs WebGPU's differences: its 0 to 1 clip
+    depth and its top-down texture rows.
   - `fish.ts` lofts bodies and fins from a parameter table, swims them in the vertex shader, and
     paints each species' pattern in the fragment shader.
   - `post.ts` resolves 4x MSAA, ray-marches light shafts at half resolution, then applies bloom and
-    ACES tone mapping.
+    ACES tone mapping. WebGPU can't resolve depth, so there the shafts read the multisampled depth
+    buffer directly.
 
 Each frame renders the caustic texture, then the shadow map, then the HDR scene, then post. If the
 frame rate stays low, the render resolution steps down automatically.
