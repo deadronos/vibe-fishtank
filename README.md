@@ -113,8 +113,8 @@ gh api -X POST repos/deadronos/vibe-fishtank/environments/github-pages/deploymen
   - `common.ts` holds the shared lighting: Beer-Lambert absorption and in-scatter along each view
     ray, plus caustics and shadow lookups. It also absorbs WebGPU's differences: its 0 to 1 clip
     depth and its top-down texture rows.
-  - `fish.ts` lofts bodies and fins from a parameter table, swims them in the vertex shader, and
-    paints each species' pattern in the fragment shader.
+  - `fishGeom.ts` lofts bodies and fins from a parameter table; `fish.ts` swims them in the
+    vertex shader and paints each species' pattern in the fragment shader.
   - `post.ts` resolves 4x MSAA, ray-marches light shafts at half resolution, then applies bloom and
     ACES tone mapping. WebGPU can't resolve depth, so there the shafts read the multisampled depth
     buffer directly.
