@@ -1,4 +1,7 @@
-/** Tank dimensions, per-frame data, and the shader code shared by every underwater material. */
+/**
+ * Per-frame data and the shader code shared by every underwater material. The tank's dimensions
+ * live in the world module, which owns everything the simulation and the scene share.
+ */
 
 import type {
   Device,
@@ -11,16 +14,9 @@ import type {
   Uniforms,
 } from "../lib/gpu/types";
 import { normalize, type Floats, type Vec3 } from "../lib/math";
+import { TANK } from "../world";
 
-export const TANK = {
-  halfX: 1.5,
-  halfZ: 0.65,
-  height: 1.4,
-  water: 1.28,
-} as const;
-
-export const WATER_MIN: Vec3 = [-TANK.halfX, 0, -TANK.halfZ];
-export const WATER_MAX: Vec3 = [TANK.halfX, TANK.water, TANK.halfZ];
+export { TANK, WATER_MAX, WATER_MIN } from "../world";
 export const LIGHT_DIR: Vec3 = normalize([0.22, 1, 0.1]);
 
 const f = (x: number): string => x.toFixed(6);

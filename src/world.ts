@@ -1,8 +1,21 @@
-/** The aquascape: where the sand rises, and where the stones and wood sit. */
+/**
+ * The shared world: the tank's dimensions, the volume of water in it, and the aquascape — where
+ * the sand rises and where the stones and driftwood sit. The simulation and the scene both read
+ * this, so neither depends on the other.
+ */
 
-import { fbm3 } from "../lib/noise";
-import { clamp, smoothstep, type Vec3 } from "../lib/math";
-import { TANK } from "./common";
+import { fbm3 } from "./lib/noise";
+import { clamp, smoothstep, type Vec3 } from "./lib/math";
+
+export const TANK = {
+  halfX: 1.5,
+  halfZ: 0.65,
+  height: 1.4,
+  water: 1.28,
+} as const;
+
+export const WATER_MIN: Vec3 = [-TANK.halfX, 0, -TANK.halfZ];
+export const WATER_MAX: Vec3 = [TANK.halfX, TANK.water, TANK.halfZ];
 
 export interface Stone {
   x: number;

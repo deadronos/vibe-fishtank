@@ -17,7 +17,7 @@ import {
   type Drawable,
   type SceneTargets,
 } from "./common";
-import { sandHeight, stoneClearance } from "./layout";
+import { sandHeight, stoneClearance } from "../world";
 
 const VS = `${FRAME_GLSL}
 layout(location = 0) in vec3 aPos;

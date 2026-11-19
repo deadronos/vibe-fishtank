@@ -51,6 +51,7 @@ class GLTexture implements Texture {
     if (samples > 1) {
       // Multisampled targets are never sampled in WebGL2: they're resolved with a blit.
       this.renderbuffer = gl.createRenderbuffer();
+      if (!this.renderbuffer) throw new Error("Could not create renderbuffer");
       gl.bindRenderbuffer(gl.RENDERBUFFER, this.renderbuffer);
       gl.renderbufferStorageMultisample(
         gl.RENDERBUFFER,
@@ -62,6 +63,7 @@ class GLTexture implements Texture {
       return;
     }
     this.texture = gl.createTexture();
+    if (!this.texture) throw new Error("Could not create texture");
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     const levels = desc.mipmaps ? Math.floor(Math.log2(Math.max(desc.width, desc.height))) + 1 : 1;
     gl.texStorage2D(gl.TEXTURE_2D, levels, internal, desc.width, desc.height);
@@ -111,6 +113,7 @@ class GLPipeline implements Pipeline {
     this.desc = desc;
     const fragment = desc.color ? desc.shader.glsl.fragment : DEPTH_ONLY_FS;
     const program = gl.createProgram();
+    if (!program) throw new Error("Could not create program");
     gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, desc.shader.glsl.vertex, desc.label));
     gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragment, desc.label));
     gl.linkProgram(program);
@@ -162,11 +165,15 @@ class GLMesh implements Mesh {
   constructor(gl: WebGL2RenderingContext, geometry: Geometry, instances?: readonly number[]) {
     this.gl = gl;
     this.instanceFloats = instances?.reduce((sum, size) => sum + size, 0) ?? 0;
-    this.vao = gl.createVertexArray();
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Could not create vertex array");
+    this.vao = vao;
     this.count = geometry.indices.length;
     gl.bindVertexArray(this.vao);
     const attribute = (slot: number, data: Floats, size: number): void => {
-      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      const buffer = gl.createBuffer();
+      if (!buffer) throw new Error("Could not create buffer");
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
       gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
       gl.enableVertexAttribArray(slot);
       gl.vertexAttribPointer(slot, size, gl.FLOAT, false, 0, 0);
@@ -175,12 +182,15 @@ class GLMesh implements Mesh {
     attribute(ATTR.normal, geometry.normals, 3);
     attribute(ATTR.uv, geometry.uvs, 2);
     attribute(ATTR.extra, geometry.extras, 1);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+    const elements = gl.createBuffer();
+    if (!elements) throw new Error("Could not create buffer");
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, elements);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geometry.indices, gl.STATIC_DRAW);
 
     if (instances) {
       this.instanceCount = 0;
       this.instanceBuffer = gl.createBuffer();
+      if (!this.instanceBuffer) throw new Error("Could not create buffer");
       gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
       const stride = this.instanceFloats * 4;
       let offset = 0;
@@ -351,7 +361,9 @@ export class WebGL2Device implements Device {
     };
 
     this.align = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) as number;
-    this.ring = gl.createBuffer();
+    const ring = gl.createBuffer();
+    if (!ring) throw new Error("Could not create buffer");
+    this.ring = ring;
     gl.bindBuffer(gl.UNIFORM_BUFFER, this.ring);
     gl.bufferData(gl.UNIFORM_BUFFER, RING_BYTES, gl.DYNAMIC_DRAW);
   }
@@ -423,6 +435,7 @@ export class WebGL2Device implements Device {
     if (cached) return cached.fbo;
     const { gl } = this;
     const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error("Could not create framebuffer");
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     const attach = (attachment: number, texture: GLTexture, mip: number): void => {
       if (texture.renderbuffer) {

@@ -124,22 +124,28 @@ export interface DrawBindings {
   textures?: readonly Texture[];
 }
 
+/** The color attachment a pass renders into. */
+export interface PassColorDesc {
+  target: Texture | "canvas";
+  /** Mip level to render into. */
+  level?: number;
+  /** Where a multisampled target resolves to when the pass ends. */
+  resolve?: Texture;
+  clear?: readonly [number, number, number, number];
+}
+
+/** The depth attachment a pass renders into. */
+export interface PassDepthDesc {
+  target: Texture;
+  /** Ignored when the device can't resolve depth; check `caps.depthResolve`. */
+  resolve?: Texture;
+  clear?: number;
+}
+
 export interface PassDesc {
   label: string;
-  color?: {
-    target: Texture | "canvas";
-    /** Mip level to render into. */
-    level?: number;
-    /** Where a multisampled target resolves to when the pass ends. */
-    resolve?: Texture;
-    clear?: readonly [number, number, number, number];
-  };
-  depth?: {
-    target: Texture;
-    /** Ignored when the device can't resolve depth; check `caps.depthResolve`. */
-    resolve?: Texture;
-    clear?: number;
-  };
+  color?: PassColorDesc;
+  depth?: PassDepthDesc;
 }
 
 export interface Pass {
