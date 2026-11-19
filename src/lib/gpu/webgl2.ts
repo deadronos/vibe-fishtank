@@ -161,6 +161,7 @@ class GLMesh implements Mesh {
   private readonly gl: WebGL2RenderingContext;
   private readonly instanceBuffer: WebGLBuffer | null = null;
   private readonly instanceFloats: number;
+  private instanceBytes = 0;
 
   constructor(gl: WebGL2RenderingContext, geometry: Geometry, instances?: readonly number[]) {
     this.gl = gl;
@@ -210,7 +211,14 @@ class GLMesh implements Mesh {
     this.instanceCount = count;
     if (count === 0) return;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * this.instanceFloats), gl.DYNAMIC_DRAW);
+    // Callers reuse fixed-size arrays every frame, so the first call sets the buffer's
+    // high-water mark and later frames only overwrite the live prefix with bufferSubData,
+    // instead of orphaning the storage with bufferData on every upload.
+    if (this.instanceBytes < data.byteLength) {
+      this.instanceBytes = data.byteLength;
+      gl.bufferData(gl.ARRAY_BUFFER, this.instanceBytes, gl.DYNAMIC_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data.subarray(0, count * this.instanceFloats));
   }
 
   draw(): void {
@@ -283,6 +291,12 @@ class GLPass implements Pass {
     }
     if (desc.alphaToCoverage) gl.enable(gl.SAMPLE_ALPHA_TO_COVERAGE);
     else gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+    const cull = desc.cull === true;
+    if (cull !== this.device.culling) {
+      if (cull) gl.enable(gl.CULL_FACE);
+      else gl.disable(gl.CULL_FACE);
+      this.device.culling = cull;
+    }
 
     const { frame, params, textures } = bindings;
     if (frame) gl.bindBufferRange(gl.UNIFORM_BUFFER, FRAME_BINDING, ring, frame.offset, frame.size);
@@ -324,6 +338,8 @@ export class WebGL2Device implements Device {
   readonly caps: Capabilities;
   readonly ring: WebGLBuffer;
   readonly anisotropic: EXT_texture_filter_anisotropic | null;
+  /** Whether back-face culling is on, tracked so consecutive draws skip redundant GL calls. */
+  culling = false;
   private readonly canvas: HTMLCanvasElement;
   private readonly align: number;
   private readonly framebuffers = new Map<string, { fbo: WebGLFramebuffer; ids: number[] }>();
@@ -334,6 +350,8 @@ export class WebGL2Device implements Device {
     this.canvas = canvas;
     this.gl = gl;
     gl.disable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
 
     const features = gl.getSupportedExtensions() ?? [];
     const used: string[] = [];
