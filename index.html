@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#05090c" />
-    <meta name="description" content="A planted aquarium rendered in raw WebGL2." />
+    <meta name="description" content="A planted aquarium rendered in raw WebGPU, or WebGL2 where WebGPU isn't available." />
     <title>Vibe Fishtank</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐟</text></svg>" />
     <link rel="stylesheet" href="/src/style.css" />
@@ -15,6 +15,7 @@
     <header class="plate">
       <h1>Vibe Fishtank</h1>
       <p id="census"></p>
+      <p id="renderer" class="renderer"></p>
     </header>
 
     <div class="controls" role="toolbar" aria-label="Tank controls">

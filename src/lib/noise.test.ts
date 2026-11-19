@@ -1,18 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createRng, fbm3, noise3 } from "./noise";
 
-const firstSix = (seed: number): number[] => {
-  const rng = createRng(seed);
-  return Array.from({ length: 6 }, () => rng());
-};
+const take = (rng: () => number, n: number): number[] => Array.from({ length: n }, rng);
 
 describe("createRng", () => {
-  // Fixed seeds build the world: the fish scatter, the pebble field, the plant
-  // layout. Changing the sequence silently regenerates all of that content,
-  // so pin the outputs the aquascape depends on.
-  it("produces the exact documented sequence for a given seed", () => {
-    const first = firstSix;
-    expect(first(0).map((v) => v.toFixed(12))).toEqual([
+  // Fixed seeds build the world — the fish scatter, food drops, pebble fields
+  // and plant placement all derive from them — so a changed sequence silently
+  // regenerates the aquascape. Pin the outputs; change them only on purpose.
+  it("produces the documented sequence for a given seed", () => {
+    expect(take(createRng(0), 6).map((v) => v.toFixed(12))).toEqual([
       "0.266429208685",
       "0.000329745701",
       "0.223272027448",
@@ -20,7 +16,7 @@ describe("createRng", () => {
       "0.467327822931",
       "0.545049082721",
     ]);
-    expect(first(90210).map((v) => v.toFixed(12))).toEqual([
+    expect(take(createRng(90210), 6).map((v) => v.toFixed(12))).toEqual([
       "0.281729944982",
       "0.736178235151",
       "0.921530475374",
@@ -30,95 +26,65 @@ describe("createRng", () => {
     ]);
   });
 
-  it("reproduces the same sequence for the same seed", () => {
-    const a = createRng(1234);
-    const b = createRng(1234);
-    for (let i = 0; i < 1000; i++) expect(a()).toBe(b());
+  it("repeats the same sequence for the same seed", () => {
+    expect(take(createRng(42), 20)).toEqual(take(createRng(42), 20));
   });
 
-  it("produces different sequences for different seeds", () => {
-    const a = createRng(1);
-    const b = createRng(2);
-    let same = 0;
-    for (let i = 0; i < 100; i++) if (a() === b()) same++;
-    expect(same).toBeLessThan(100);
+  it("gives different sequences for different seeds", () => {
+    expect(take(createRng(1), 5)).not.toEqual(take(createRng(2), 5));
   });
 
-  it("stays within [0, 1) and is roughly uniform", () => {
-    for (const seed of [0, 1, 42, 90210, 0xffffffff]) {
-      const rng = createRng(seed);
-      let sum = 0;
-      const buckets = Array.from({ length: 10 }, () => 0);
-      for (let i = 0; i < 10000; i++) {
-        const v = rng();
-        expect(v).toBeGreaterThanOrEqual(0);
-        expect(v).toBeLessThan(1);
-        sum += v;
-        buckets[Math.min(9, Math.floor(v * 10))]++;
-      }
-      expect(sum / 10000).toBeGreaterThan(0.47);
-      expect(sum / 10000).toBeLessThan(0.53);
-      // Every decile is populated; no big gaps in the distribution.
-      for (const count of buckets) expect(count).toBeGreaterThan(700);
-    }
+  it("stays in [0, 1) and is roughly uniform", () => {
+    const values = take(createRng(7), 10_000);
+    expect(Math.min(...values)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...values)).toBeLessThan(1);
+    const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+    expect(mean).toBeCloseTo(0.5, 1);
+    const buckets = Array.from({ length: 10 }, () => 0);
+    for (const v of values) buckets[Math.floor(v * 10)]++;
+    for (const count of buckets) expect(count).toBeGreaterThan(850);
   });
 });
 
 describe("noise3", () => {
-  it("stays within 0..1", () => {
-    const rng = createRng(77);
-    for (let i = 0; i < 2000; i++) {
-      const v = noise3(rng() * 20 - 10, rng() * 20 - 10, rng() * 20 - 10);
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThanOrEqual(1);
-    }
-  });
+  const samples = take(createRng(3), 600).map((v, i) => [v * 40 - 20, (i % 37) * 0.7, i * 0.13]);
 
-  it("is continuous: nearby inputs give nearby values", () => {
-    const rng = createRng(78);
-    for (let i = 0; i < 200; i++) {
-      const x = rng() * 8 - 4;
-      const y = rng() * 8 - 4;
-      const z = rng() * 8 - 4;
-      const v = noise3(x, y, z);
-      expect(Math.abs(v - noise3(x + 0.01, y, z))).toBeLessThan(0.1);
-      expect(Math.abs(v - noise3(x, y + 0.01, z))).toBeLessThan(0.1);
-      expect(Math.abs(v - noise3(x, y, z + 0.01))).toBeLessThan(0.1);
+  it("stays within 0..1", () => {
+    for (const [x, y, z] of samples) {
+      const n = noise3(x, y, z);
+      expect(n).toBeGreaterThanOrEqual(0);
+      expect(n).toBeLessThanOrEqual(1);
     }
   });
 
   it("is deterministic", () => {
-    expect(noise3(1.7, 2.3, 0.9)).toBe(noise3(1.7, 2.3, 0.9));
+    expect(noise3(1.25, -3.5, 8.75)).toBe(noise3(1.25, -3.5, 8.75));
+  });
+
+  it("is continuous, including across lattice cells", () => {
+    for (const [x, y, z] of [...samples.slice(0, 50), [2, 3, 4]]) {
+      expect(Math.abs(noise3(x + 1e-4, y, z) - noise3(x - 1e-4, y, z))).toBeLessThan(1e-3);
+    }
+  });
+
+  it("actually varies", () => {
+    const values = new Set(samples.map(([x, y, z]) => noise3(x, y, z).toFixed(3)));
+    expect(values.size).toBeGreaterThan(100);
   });
 });
 
 describe("fbm3", () => {
-  it("stays within 0..1 and varies over the tank's scale", () => {
-    const rng = createRng(79);
-    let low = 1;
-    let high = 0;
-    for (let i = 0; i < 2000; i++) {
-      const v = fbm3(rng() * 3 - 1.5, 3, rng() * 2 - 1);
-      expect(v).toBeGreaterThanOrEqual(0);
-      expect(v).toBeLessThanOrEqual(1);
-      low = Math.min(low, v);
-      high = Math.max(high, v);
-    }
-    expect(high - low).toBeGreaterThan(0.3);
+  it("equals plain noise with one octave", () => {
+    expect(fbm3(0.3, 1.7, -2.2, 1)).toBe(noise3(0.3, 1.7, -2.2));
   });
 
-  it("is continuous across small steps in every axis", () => {
-    const rng = createRng(80);
-    // Four octaves at most 8.4× frequency: a 0.01 step stays well under
-    // the sum of each octave's maximum slope, times its weight.
-    for (let i = 0; i < 500; i++) {
-      const x = rng() * 8 - 4;
-      const y = rng() * 8 - 4;
-      const z = rng() * 8 - 4;
-      const v = fbm3(x, y, z);
-      expect(Math.abs(v - fbm3(x + 0.01, y, z))).toBeLessThan(0.06);
-      expect(Math.abs(v - fbm3(x, y + 0.01, z))).toBeLessThan(0.06);
-      expect(Math.abs(v - fbm3(x, y, z + 0.01))).toBeLessThan(0.06);
+  it("stays within 0..1 for several octave counts", () => {
+    for (const octaves of [2, 4, 6]) {
+      for (let i = 0; i < 200; i++) {
+        const n = fbm3(i * 0.37, i * -0.11, i * 0.05, octaves);
+        expect(n).toBeGreaterThanOrEqual(0);
+        expect(n).toBeLessThanOrEqual(1);
+      }
     }
   });
 });

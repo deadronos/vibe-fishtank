@@ -1,26 +1,27 @@
 /** The frame pipeline's screen-space half: MSAA resolve, light shafts, bloom and tone mapping. */
 
-import {
-  createTarget,
-  deleteTarget,
-  drawFullscreen,
-  FULLSCREEN_VS,
-  Program,
-  type ColorFormat,
-  type Target,
-} from "../lib/gl";
+import type { Device, Pass, Pipeline, Texture, TextureDesc, Uniforms } from "../lib/gpu/types";
 import type { Floats } from "../lib/math";
-import { bindWaterSamplers, FRAME_GLSL, UNIT_SHADOW, WATER_GLSL } from "./common";
+import {
+  FRAME_GLSL,
+  FRAME_WGSL,
+  FULLSCREEN_GLSL,
+  FULLSCREEN_WGSL,
+  PRELUDE_WGSL,
+  shader,
+  WATER_GLSL,
+  WATER_TEXTURES,
+  WATER_WGSL,
+  type SceneTargets,
+} from "./common";
 
-const UNIT_A = 2;
-const UNIT_B = 3;
-const UNIT_C = 4;
 const BLOOM_LEVELS = 5;
+const SHADOW_SIZE = 1024;
 
 const SHAFTS_FS = `${FRAME_GLSL}${WATER_GLSL}
 in vec2 vUv;
 uniform sampler2D uDepth;
-uniform mat4 uInvViewProj;
+layout(std140) uniform Params { mat4 uInvViewProj; };
 out vec4 outColor;
 
 float ign(vec2 p) {
@@ -63,13 +64,67 @@ void main() {
   outColor = vec4(sum * stepLength * uLightCol * 0.05, 1.0);
 }`;
 
+/**
+ * WebGPU can't resolve depth, so this reads the multisampled depth buffer's first sample. The
+ * WebGPU device always renders the scene with 4x MSAA, so the binding is always multisampled.
+ */
+const SHAFTS_WGSL = `${FRAME_WGSL}${WATER_WGSL}${FULLSCREEN_WGSL}
+@group(0) @binding(5) var depthTex: texture_depth_multisampled_2d;
+@group(1) @binding(0) var<uniform> invViewProj: mat4x4f;
+
+fn ign(p: vec2f) -> f32 {
+  return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715))));
+}
+
+@fragment fn fs(v: FsOut) -> @location(0) vec4f {
+  let ndc = vec2f(v.uv.x * 2.0 - 1.0, 1.0 - v.uv.y * 2.0);
+  let farPoint = invViewProj * vec4f(ndc, 1.0, 1.0);
+  let rd = normalize(farPoint.xyz / farPoint.w - frame.camPos);
+  let hit = boxRay(frame.camPos, rd);
+  let a = max(hit.x, 0.0);
+  var b = hit.y;
+  if (b <= a) { return vec4f(0.0); }
+  let size = vec2f(textureDimensions(depthTex));
+  let texel = vec2i(clamp(v.uv * size, vec2f(0.0), size - 1.0));
+  let sceneDepth = textureLoad(depthTex, texel, 0);
+  let scene = invViewProj * vec4f(ndc, sceneDepth * 2.0 - 1.0, 1.0);
+  b = min(b, length(scene.xyz / scene.w - frame.camPos));
+  if (b <= a) { return vec4f(0.0); }
+  const STEPS = 14;
+  let stepLength = (b - a) / f32(STEPS);
+  var t = a + stepLength * ign(v.pos.xy);
+  var sum = vec3f(0.0);
+  for (var i = 0; i < STEPS; i++) {
+    let p = frame.camPos + rd * t;
+    let depth = max(WATER_Y - p.y, 0.0);
+    let uv = lightUv(p);
+    var beam = textureSampleLevel(causticsTex, causticsSamp, uv * 0.42, 3.4).r
+      + 0.5 * textureSampleLevel(causticsTex, causticsSamp, uv * 0.19 + 0.3, 3.8).r;
+    beam = smoothstep(0.08, 0.34, beam);
+    let lp = shadowCoord(p);
+    let visible = textureSampleCompareLevel(shadowTex, shadowSamp, lp.xy, lp.z - 0.004);
+    sum += beam * visible * exp(-depth * ABSORB) * exp(-(t - a) * FOG);
+    t += stepLength;
+  }
+  return vec4f(sum * stepLength * frame.lightCol * 0.05, 1.0);
+}`;
+
+/** Bindings for post passes that read one filtered texture. */
+const SOURCE_WGSL = `
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(1) @binding(0) var<uniform> p: vec4f;
+fn at(uv: vec2f) -> vec3f { return textureSample(tex, samp, uv).rgb; }
+`;
+
 const DOWN_FS = `
 in vec2 vUv;
 uniform sampler2D uTex;
-uniform vec2 uTexel;
-uniform float uThreshold;
+layout(std140) uniform Params { vec4 uP; };
 out vec4 outColor;
 void main() {
+  vec2 uTexel = uP.xy;
+  float uThreshold = uP.z;
   vec3 c = texture(uTex, vUv).rgb * 0.25;
   c += texture(uTex, vUv + uTexel * vec2(-1.0, -1.0)).rgb * 0.1875;
   c += texture(uTex, vUv + uTexel * vec2(1.0, -1.0)).rgb * 0.1875;
@@ -83,12 +138,30 @@ void main() {
   outColor = vec4(c, 1.0);
 }`;
 
+const DOWN_WGSL = `${PRELUDE_WGSL}${FULLSCREEN_WGSL}${SOURCE_WGSL}
+@fragment fn fs(v: FsOut) -> @location(0) vec4f {
+  let texel = p.xy;
+  let threshold = p.z;
+  var c = at(v.uv) * 0.25;
+  c += at(v.uv + texel * vec2f(-1.0, -1.0)) * 0.1875;
+  c += at(v.uv + texel * vec2f(1.0, -1.0)) * 0.1875;
+  c += at(v.uv + texel * vec2f(-1.0, 1.0)) * 0.1875;
+  c += at(v.uv + texel * vec2f(1.0, 1.0)) * 0.1875;
+  if (threshold > 0.0) {
+    let l = max(c.r, max(c.g, c.b));
+    c *= smoothstep(threshold * 0.6, threshold * 1.4, l);
+    c = min(c, vec3f(8.0));
+  }
+  return vec4f(c, 1.0);
+}`;
+
 const UP_FS = `
 in vec2 vUv;
 uniform sampler2D uTex;
-uniform vec2 uTexel;
+layout(std140) uniform Params { vec4 uP; };
 out vec4 outColor;
 void main() {
+  vec2 uTexel = uP.xy;
   vec3 c = texture(uTex, vUv).rgb * 4.0;
   c += texture(uTex, vUv + uTexel * vec2(-1.0, 0.0)).rgb * 2.0;
   c += texture(uTex, vUv + uTexel * vec2(1.0, 0.0)).rgb * 2.0;
@@ -101,12 +174,27 @@ void main() {
   outColor = vec4(c / 16.0, 1.0);
 }`;
 
+const UP_WGSL = `${PRELUDE_WGSL}${FULLSCREEN_WGSL}${SOURCE_WGSL}
+@fragment fn fs(v: FsOut) -> @location(0) vec4f {
+  let texel = p.xy;
+  var c = at(v.uv) * 4.0;
+  c += at(v.uv + texel * vec2f(-1.0, 0.0)) * 2.0;
+  c += at(v.uv + texel * vec2f(1.0, 0.0)) * 2.0;
+  c += at(v.uv + texel * vec2f(0.0, -1.0)) * 2.0;
+  c += at(v.uv + texel * vec2f(0.0, 1.0)) * 2.0;
+  c += at(v.uv + texel * vec2f(-1.0, -1.0));
+  c += at(v.uv + texel * vec2f(1.0, -1.0));
+  c += at(v.uv + texel * vec2f(-1.0, 1.0));
+  c += at(v.uv + texel * vec2f(1.0, 1.0));
+  return vec4f(c / 16.0, 1.0);
+}`;
+
 const COMPOSITE_FS = `
 in vec2 vUv;
 uniform sampler2D uScene;
 uniform sampler2D uShafts;
 uniform sampler2D uBloom;
-uniform float uTime;
+layout(std140) uniform Params { vec4 uP; };
 out vec4 outColor;
 
 vec3 aces(vec3 x) {
@@ -116,6 +204,7 @@ float noise(vec2 p) {
   return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
 }
 void main() {
+  float uTime = uP.x;
   vec3 hdr = texture(uScene, vUv).rgb + texture(uShafts, vUv).rgb + texture(uBloom, vUv).rgb * 0.2;
   vec2 q = vUv - 0.5;
   hdr *= 1.0 - dot(q, q) * 0.72;
@@ -125,251 +214,252 @@ void main() {
   outColor = vec4(c, 1.0);
 }`;
 
-export class PostPipeline {
-  private readonly gl: WebGL2RenderingContext;
-  private readonly shafts: Program;
-  private readonly down: Program;
-  private readonly up: Program;
-  private readonly composite: Program;
-  private readonly format: ColorFormat;
-  private readonly samples: number;
+const COMPOSITE_WGSL = `${PRELUDE_WGSL}${FULLSCREEN_WGSL}
+@group(0) @binding(1) var sceneTex: texture_2d<f32>;
+@group(0) @binding(2) var sceneSamp: sampler;
+@group(0) @binding(3) var shaftsTex: texture_2d<f32>;
+@group(0) @binding(4) var shaftsSamp: sampler;
+@group(0) @binding(5) var bloomTex: texture_2d<f32>;
+@group(0) @binding(6) var bloomSamp: sampler;
+@group(1) @binding(0) var<uniform> p: vec4f;
 
-  private msaaFbo: WebGLFramebuffer | null = null;
-  private colorRb: WebGLRenderbuffer | null = null;
-  private depthRb: WebGLRenderbuffer | null = null;
-  private resolveFbo: WebGLFramebuffer | null = null;
-  private resolveColor: WebGLTexture | null = null;
-  private resolveDepth: WebGLTexture | null = null;
-  private shaftsTarget: Target | null = null;
-  private bloomDown: Target[] = [];
-  private bloomUp: Target[] = [];
+fn aces(x: vec3f) -> vec3f {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn noise(q: vec2f) -> f32 {
+  return fract(sin(dot(q, vec2f(12.9898, 78.233))) * 43758.5453);
+}
+@fragment fn fs(v: FsOut) -> @location(0) vec4f {
+  var hdr = textureSample(sceneTex, sceneSamp, v.uv).rgb
+    + textureSample(shaftsTex, shaftsSamp, v.uv).rgb
+    + textureSample(bloomTex, bloomSamp, v.uv).rgb * 0.2;
+  let q = v.uv - 0.5;
+  hdr *= 1.0 - dot(q, q) * 0.72;
+  var c = aces(hdr * 1.08);
+  c = pow(c, vec3f(1.0 / 2.2));
+  c += (noise(v.pos.xy + fract(p.x) * 61.0) - 0.5) / 255.0 * 1.6;
+  return vec4f(c, 1.0);
+}`;
+
+interface Targets {
+  sceneColor: Texture;
+  sceneDepth: Texture;
+  resolveColor: Texture;
+  /** Only on devices that can resolve depth; otherwise shafts read `sceneDepth` directly. */
+  resolveDepth: Texture | null;
+  shafts: Texture;
+  bloomDown: Texture[];
+  bloomUp: Texture[];
+}
+
+export class PostPipeline {
+  readonly targets: SceneTargets;
+  private readonly device: Device;
+  private readonly shafts: Pipeline;
+  private readonly down: Pipeline;
+  private readonly up: Pipeline;
+  private readonly upAdd: Pipeline;
+  private readonly composite: Pipeline;
+  private readonly vec4: Floats = new Float32Array(4);
+  private textures: Targets | null = null;
   private width = 0;
   private height = 0;
 
-  constructor(gl: WebGL2RenderingContext) {
-    this.gl = gl;
-    const float = gl.getExtension("EXT_color_buffer_float") !== null;
-    this.format = float
-      ? { internal: gl.RGBA16F, type: gl.HALF_FLOAT }
-      : { internal: gl.RGBA8, type: gl.UNSIGNED_BYTE };
-    const maxSamples = float
-      ? gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA16F, gl.SAMPLES)
-      : [4];
-    const available = (maxSamples as Int32Array | number[])[0] ?? 0;
-    this.samples = Math.min(4, available);
+  constructor(device: Device) {
+    this.device = device;
+    const { caps } = device;
+    this.targets = { color: caps.hdrFormat, samples: caps.samples };
+    const color = caps.hdrFormat;
+    const fullscreen = { vertex: "none", params: 16, color } as const;
+    const source = [{ name: "uTex", kind: "float" }] as const;
 
-    this.shafts = new Program(gl, FULLSCREEN_VS, SHAFTS_FS);
-    bindWaterSamplers(this.shafts);
-    this.shafts.int("uDepth", UNIT_A);
-    this.down = new Program(gl, FULLSCREEN_VS, DOWN_FS);
-    this.down.use().int("uTex", UNIT_A);
-    this.up = new Program(gl, FULLSCREEN_VS, UP_FS);
-    this.up.use().int("uTex", UNIT_A);
-    this.composite = new Program(gl, FULLSCREEN_VS, COMPOSITE_FS);
-    this.composite.use().int("uScene", UNIT_A).int("uShafts", UNIT_B).int("uBloom", UNIT_C);
+    this.shafts = device.createPipeline({
+      ...fullscreen,
+      label: "light shafts",
+      shader: shader(FULLSCREEN_GLSL, SHAFTS_FS, SHAFTS_WGSL),
+      frame: true,
+      params: 64,
+      textures: [
+        ...WATER_TEXTURES,
+        { name: "uDepth", kind: "depth", multisampled: !caps.depthResolve },
+      ],
+    });
+    this.down = device.createPipeline({
+      ...fullscreen,
+      label: "bloom down",
+      shader: shader(FULLSCREEN_GLSL, DOWN_FS, DOWN_WGSL),
+      textures: source,
+    });
+    const up = shader(FULLSCREEN_GLSL, UP_FS, UP_WGSL);
+    this.up = device.createPipeline({
+      ...fullscreen,
+      label: "bloom up",
+      shader: up,
+      textures: source,
+    });
+    this.upAdd = device.createPipeline({
+      ...fullscreen,
+      label: "bloom up add",
+      shader: up,
+      textures: source,
+      blend: "additive",
+    });
+    this.composite = device.createPipeline({
+      ...fullscreen,
+      label: "composite",
+      shader: shader(FULLSCREEN_GLSL, COMPOSITE_FS, COMPOSITE_WGSL),
+      color: "canvas",
+      textures: [
+        { name: "uScene", kind: "float" },
+        { name: "uShafts", kind: "float" },
+        { name: "uBloom", kind: "float" },
+      ],
+    });
   }
 
   resize(width: number, height: number): void {
     if (width === this.width && height === this.height) return;
     this.width = width;
     this.height = height;
-    this.release();
-    const { gl, format, samples } = this;
-
-    this.colorRb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, this.colorRb);
-    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, format.internal, width, height);
-    this.depthRb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthRb);
-    gl.renderbufferStorageMultisample(
-      gl.RENDERBUFFER,
-      samples,
-      gl.DEPTH_COMPONENT24,
-      width,
-      height,
-    );
-    this.msaaFbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaaFbo);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, this.colorRb);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depthRb);
-
-    gl.activeTexture(gl.TEXTURE7);
-    this.resolveColor = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.resolveColor);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, format.internal, width, height);
-    for (const [param, value] of [
-      [gl.TEXTURE_MIN_FILTER, gl.LINEAR],
-      [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
-      [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE],
-      [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE],
-    ] as const) {
-      gl.texParameteri(gl.TEXTURE_2D, param, value);
+    const { device, targets } = this;
+    if (this.textures) {
+      const old = this.textures;
+      for (const texture of [
+        old.sceneColor,
+        old.sceneDepth,
+        old.resolveColor,
+        old.resolveDepth,
+        old.shafts,
+        ...old.bloomDown,
+        ...old.bloomUp,
+      ]) {
+        texture?.destroy();
+      }
     }
-    this.resolveDepth = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.resolveDepth);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, width, height);
-    for (const [param, value] of [
-      [gl.TEXTURE_MIN_FILTER, gl.NEAREST],
-      [gl.TEXTURE_MAG_FILTER, gl.NEAREST],
-      [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE],
-      [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE],
-    ] as const) {
-      gl.texParameteri(gl.TEXTURE_2D, param, value);
-    }
-    this.resolveFbo = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.resolveFbo);
-    gl.framebufferTexture2D(
-      gl.FRAMEBUFFER,
-      gl.COLOR_ATTACHMENT0,
-      gl.TEXTURE_2D,
-      this.resolveColor,
-      0,
-    );
-    gl.framebufferTexture2D(
-      gl.FRAMEBUFFER,
-      gl.DEPTH_ATTACHMENT,
-      gl.TEXTURE_2D,
-      this.resolveDepth,
-      0,
-    );
+    const make = (label: string, w: number, h: number, extra: Partial<TextureDesc> = {}): Texture =>
+      device.createTexture({ label, width: w, height: h, format: targets.color, ...extra });
 
-    this.shaftsTarget = createTarget(gl, Math.max(1, width >> 1), Math.max(1, height >> 1), format);
+    const bloomDown: Texture[] = [];
+    const bloomUp: Texture[] = [];
     let w = width;
     let h = height;
     for (let i = 0; i < BLOOM_LEVELS; i++) {
       w = Math.max(2, w >> 1);
       h = Math.max(2, h >> 1);
-      this.bloomDown.push(createTarget(gl, w, h, format));
-      if (i < BLOOM_LEVELS - 1) this.bloomUp.push(createTarget(gl, w, h, format));
+      bloomDown.push(make(`bloom down ${i}`, w, h));
+      if (i < BLOOM_LEVELS - 1) bloomUp.push(make(`bloom up ${i}`, w, h));
     }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.textures = {
+      sceneColor: make("scene", width, height, { samples: targets.samples }),
+      sceneDepth: make("scene depth", width, height, {
+        format: "depth24",
+        samples: targets.samples,
+        filter: "nearest",
+      }),
+      resolveColor: make("scene resolved", width, height),
+      resolveDepth: device.caps.depthResolve
+        ? make("scene depth resolved", width, height, { format: "depth24", filter: "nearest" })
+        : null,
+      shafts: make("shafts", Math.max(1, width >> 1), Math.max(1, height >> 1)),
+      bloomDown,
+      bloomUp,
+    };
   }
 
-  private release(): void {
-    const { gl } = this;
-    gl.deleteFramebuffer(this.msaaFbo);
-    gl.deleteRenderbuffer(this.colorRb);
-    gl.deleteRenderbuffer(this.depthRb);
-    gl.deleteFramebuffer(this.resolveFbo);
-    gl.deleteTexture(this.resolveColor);
-    gl.deleteTexture(this.resolveDepth);
-    if (this.shaftsTarget) deleteTarget(gl, this.shaftsTarget);
-    for (const target of [...this.bloomDown, ...this.bloomUp]) deleteTarget(gl, target);
-    this.bloomDown = [];
-    this.bloomUp = [];
+  /** Starts the HDR scene pass, which resolves when it ends. */
+  beginScene(): Pass {
+    const t = this.current();
+    return this.device.beginPass({
+      label: "scene",
+      color: { target: t.sceneColor, resolve: t.resolveColor, clear: [0, 0, 0, 1] },
+      depth: { target: t.sceneDepth, resolve: t.resolveDepth ?? undefined, clear: 1 },
+    });
   }
 
-  /** Starts the HDR scene pass. */
-  beginScene(): void {
-    const { gl } = this;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.msaaFbo);
-    gl.viewport(0, 0, this.width, this.height);
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  }
+  /** Computes shafts and bloom, and tone maps to the canvas. */
+  finish(frame: Uniforms, water: readonly Texture[], invViewProj: Floats, time: number): void {
+    const { device, vec4 } = this;
+    const t = this.current();
+    const fullscreen = (
+      label: string,
+      target: Texture | "canvas",
+      draw: (pass: Pass) => void,
+    ): void => {
+      const pass = device.beginPass({ label, color: { target, clear: [0, 0, 0, 1] } });
+      draw(pass);
+      pass.end();
+    };
+    const params = (x: number, y: number, z = 0, w = 0): Uniforms => {
+      vec4.set([x, y, z, w]);
+      return device.uniforms(vec4);
+    };
 
-  /** Resolves MSAA, computes shafts and bloom, and tone maps to the canvas. */
-  finish(invViewProj: Floats, time: number): void {
-    const { gl, width, height } = this;
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.msaaFbo);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.resolveFbo);
-    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.LINEAR);
-    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
-
-    gl.disable(gl.DEPTH_TEST);
-    gl.disable(gl.BLEND);
-
-    const shafts = this.shaftsTarget as Target;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, shafts.framebuffer);
-    gl.viewport(0, 0, shafts.width, shafts.height);
-    gl.activeTexture(gl.TEXTURE0 + UNIT_A);
-    gl.bindTexture(gl.TEXTURE_2D, this.resolveDepth);
-    this.shafts.use().mat4("uInvViewProj", invViewProj);
-    drawFullscreen(gl);
+    fullscreen("light shafts", t.shafts, (pass) => {
+      pass.draw(this.shafts, null, {
+        frame,
+        params: device.uniforms(invViewProj),
+        textures: [...water, t.resolveDepth ?? t.sceneDepth],
+      });
+    });
 
     // Dual-filter bloom: walk down the pyramid, then blur back up, adding each level.
-    this.down.use();
-    let source: WebGLTexture = this.resolveColor as WebGLTexture;
-    let sourceWidth = width;
-    let sourceHeight = height;
-    this.bloomDown.forEach((target, level) => {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.viewport(0, 0, target.width, target.height);
-      gl.bindTexture(gl.TEXTURE_2D, source);
-      this.down
-        .vec2("uTexel", 1 / sourceWidth, 1 / sourceHeight)
-        .float("uThreshold", level === 0 ? 1.5 : 0);
-      drawFullscreen(gl);
-      source = target.texture;
-      sourceWidth = target.width;
-      sourceHeight = target.height;
+    let source = t.resolveColor;
+    t.bloomDown.forEach((target, level) => {
+      fullscreen(`bloom down ${level}`, target, (pass) => {
+        pass.draw(this.down, null, {
+          params: params(1 / source.width, 1 / source.height, level === 0 ? 1.5 : 0),
+          textures: [source],
+        });
+      });
+      source = target;
     });
-    this.up.use();
-    gl.blendFunc(gl.ONE, gl.ONE);
     for (let level = BLOOM_LEVELS - 2; level >= 0; level--) {
-      const target = this.bloomUp[level];
-      gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
-      gl.viewport(0, 0, target.width, target.height);
-      // Start from this level's own downsample, then add the blurred level below.
-      gl.disable(gl.BLEND);
-      gl.bindTexture(gl.TEXTURE_2D, this.bloomDown[level].texture);
-      this.up.vec2("uTexel", 1 / target.width, 1 / target.height);
-      drawFullscreen(gl);
-      gl.enable(gl.BLEND);
-      const below =
-        level === BLOOM_LEVELS - 2 ? this.bloomDown[level + 1] : this.bloomUp[level + 1];
-      gl.bindTexture(gl.TEXTURE_2D, below.texture);
-      this.up.vec2("uTexel", 1 / below.width, 1 / below.height);
-      drawFullscreen(gl);
+      const target = t.bloomUp[level];
+      const below = level === BLOOM_LEVELS - 2 ? t.bloomDown[level + 1] : t.bloomUp[level + 1];
+      fullscreen(`bloom up ${level}`, target, (pass) => {
+        // Start from this level's own downsample, then add the blurred level below.
+        pass.draw(this.up, null, {
+          params: params(1 / target.width, 1 / target.height),
+          textures: [t.bloomDown[level]],
+        });
+        pass.draw(this.upAdd, null, {
+          params: params(1 / below.width, 1 / below.height),
+          textures: [below],
+        });
+      });
     }
-    gl.disable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-    gl.activeTexture(gl.TEXTURE0 + UNIT_A);
-    gl.bindTexture(gl.TEXTURE_2D, this.resolveColor);
-    gl.activeTexture(gl.TEXTURE0 + UNIT_B);
-    gl.bindTexture(gl.TEXTURE_2D, shafts.texture);
-    gl.activeTexture(gl.TEXTURE0 + UNIT_C);
-    gl.bindTexture(gl.TEXTURE_2D, this.bloomUp[0].texture);
-    this.composite.use().float("uTime", time);
-    drawFullscreen(gl);
-    gl.activeTexture(gl.TEXTURE0 + UNIT_A);
+    fullscreen("composite", "canvas", (pass) => {
+      pass.draw(this.composite, null, {
+        params: params(time, 0),
+        textures: [t.resolveColor, t.shafts, t.bloomUp[0]],
+      });
+    });
+  }
+
+  private current(): Targets {
+    if (!this.textures) throw new Error("PostPipeline.resize wasn't called");
+    return this.textures;
   }
 }
 
-/** The directional-light depth map. Its texture stays bound to UNIT_SHADOW. */
+/** The directional light's depth map. */
 export class ShadowMap {
-  private readonly gl: WebGL2RenderingContext;
-  private readonly framebuffer: WebGLFramebuffer;
-  private readonly size = 1024;
+  readonly texture: Texture;
+  private readonly device: Device;
 
-  constructor(gl: WebGL2RenderingContext) {
-    this.gl = gl;
-    const texture = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE0 + UNIT_SHADOW);
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, this.size, this.size);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this.framebuffer = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, texture, 0);
-    gl.drawBuffers([gl.NONE]);
-    gl.readBuffer(gl.NONE);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  constructor(device: Device) {
+    this.device = device;
+    this.texture = device.createTexture({
+      label: "shadow map",
+      width: SHADOW_SIZE,
+      height: SHADOW_SIZE,
+      format: "depth24",
+      compare: true,
+    });
   }
 
-  begin(): void {
-    const { gl } = this;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
-    gl.viewport(0, 0, this.size, this.size);
-    gl.clear(gl.DEPTH_BUFFER_BIT);
-    gl.enable(gl.DEPTH_TEST);
+  begin(): Pass {
+    return this.device.beginPass({ label: "shadow", depth: { target: this.texture, clear: 1 } });
   }
 }

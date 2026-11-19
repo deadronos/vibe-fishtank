@@ -1,9 +1,18 @@
 /** Wires the simulation, the frame pipeline, and the page's controls together. */
 
 import { OrbitCamera } from "./camera";
+import { backendName, createRenderer, describe, preferredBackend, type Device } from "./lib/gpu";
 import { clamp, lerp3, lookAt, multiply, ortho, rayBox, type Vec3 } from "./lib/math";
 import { Caustics } from "./scene/caustics";
-import { FrameData, LIGHT_DIR, TANK, WATER_MAX, WATER_MIN, type Drawable } from "./scene/common";
+import {
+  FrameData,
+  LIGHT_DIR,
+  TANK,
+  WATER_MAX,
+  WATER_MIN,
+  type DrawContext,
+  type Drawable,
+} from "./scene/common";
 import { Decor } from "./scene/decor";
 import { FishRenderer } from "./scene/fish";
 import { Particles } from "./scene/particles";
@@ -31,45 +40,62 @@ function showError(message: string): void {
   error.hidden = false;
 }
 
-function start(): void {
-  const canvas = element<HTMLCanvasElement>("tank");
-  const gl = canvas.getContext("webgl2", {
-    antialias: false,
-    alpha: false,
-    depth: false,
-    powerPreference: "high-performance",
-  });
-  if (!gl) {
-    showError("This aquarium needs WebGL2, which this browser or device doesn't have available.");
-    return;
-  }
-  canvas.addEventListener("webglcontextlost", (event) => {
-    event.preventDefault();
-    showError("The graphics context was lost. Reload the page to bring the tank back.");
-  });
+/** Everything that draws, built once a device is ready. */
+class Tank {
+  readonly caustics: Caustics;
+  readonly shadowMap: ShadowMap;
+  readonly post: PostPipeline;
+  readonly fish: FishRenderer;
+  readonly particles: Particles;
+  /** Drawn into the shadow map. */
+  readonly casters: readonly Drawable[];
+  /** Drawn into the scene, opaque first, then the blended layers back to front. */
+  readonly layers: readonly Drawable[];
 
-  gl.disable(gl.CULL_FACE);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  constructor(device: Device) {
+    this.caustics = new Caustics(device);
+    this.shadowMap = new ShadowMap(device);
+    this.post = new PostPipeline(device);
+    const targets = this.post.targets;
+    const decor = new Decor(device, targets);
+    const plants = new Plants(device, targets);
+    this.fish = new FishRenderer(device, targets);
+    this.particles = new Particles(device, targets);
+    this.casters = [decor, plants, this.fish];
+    this.layers = [
+      new Room(device, targets),
+      new Sand(device, targets),
+      decor,
+      plants,
+      this.fish,
+      new WaterSurface(device, targets),
+      this.particles,
+      new Glass(device, targets),
+    ];
+  }
+}
+
+async function start(): Promise<void> {
+  const {
+    device,
+    canvas,
+    app: tank,
+    skipped,
+  } = await createRenderer(
+    element<HTMLCanvasElement>("tank"),
+    preferredBackend(),
+    (d) => new Tank(d),
+  );
+  device.onLost(() => {
+    showError("The graphics device was lost. Reload the page to bring the tank back.");
+  });
+  showRenderer(device, skipped);
 
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const camera = new OrbitCamera(reducedMotion);
-  const frame = new FrameData(gl);
-  const caustics = new Caustics(gl);
-  const shadowMap = new ShadowMap(gl);
-  const post = new PostPipeline(gl);
+  const frame = new FrameData();
   const school = new School();
-
-  const room = new Room(gl);
-  const sand = new Sand(gl);
-  const decor = new Decor(gl);
-  const plants = new Plants(gl);
-  const fish = new FishRenderer(gl);
-  const surface = new WaterSurface(gl);
-  const particles = new Particles(gl);
-  const glass = new Glass(gl);
-
-  const casters: readonly Drawable[] = [decor, plants, fish];
-  const opaque: readonly Drawable[] = [room, sand, decor, plants, fish];
+  const { caustics, shadowMap, post, fish, particles } = tank;
 
   const lightEye: Vec3 = [LIGHT_DIR[0] * 3, 0.64 + LIGHT_DIR[1] * 3, LIGHT_DIR[2] * 3];
   const lightVP = multiply(
@@ -121,7 +147,6 @@ function start(): void {
     particles.update(dt, school.food, camera.right, camera.up);
 
     frame.set(
-      camera.viewProj,
       lightVP,
       camera.position,
       time,
@@ -130,27 +155,36 @@ function start(): void {
       lerp3(SCATTER_DAY, SCATTER_NIGHT, night),
     );
 
-    caustics.render(time);
+    device.beginFrame();
+    const shadowFrame = frame.upload(device, lightVP);
+    const sceneFrame = frame.upload(device, camera.viewProj);
+    caustics.render(device, time);
 
-    frame.setViewProj(lightVP);
-    shadowMap.begin();
-    for (const item of casters) item.draw(true);
+    const shadowPass = shadowMap.begin();
+    const shadowContext: DrawContext = {
+      device,
+      pass: shadowPass,
+      frame: shadowFrame,
+      water: [],
+      shadow: true,
+    };
+    for (const item of tank.casters) item.draw(shadowContext);
+    shadowPass.end();
 
-    frame.setViewProj(camera.viewProj);
-    post.beginScene();
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(true);
-    for (const item of opaque) item.draw(false);
+    const water = [caustics.texture, shadowMap.texture];
+    const scenePass = post.beginScene();
+    const sceneContext: DrawContext = {
+      device,
+      pass: scenePass,
+      frame: sceneFrame,
+      water,
+      shadow: false,
+    };
+    for (const item of tank.layers) item.draw(sceneContext);
+    scenePass.end();
 
-    gl.enable(gl.BLEND);
-    gl.depthMask(false);
-    surface.draw(false);
-    particles.draw(false);
-    glass.draw(false);
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
-
-    post.finish(camera.invViewProj, time);
+    post.finish(sceneFrame, water, camera.invViewProj, time);
+    device.endFrame();
     requestAnimationFrame(render);
   };
 
@@ -265,9 +299,20 @@ function bindControls(
   });
 }
 
-try {
-  start();
-} catch (error) {
-  console.error(error);
-  showError("The aquarium couldn't start on this device's graphics hardware.");
+/** Names the renderer in the corner, with the details in a tooltip and the console. */
+function showRenderer(device: Device, skipped: Parameters<typeof describe>[1]): void {
+  const { caps } = device;
+  const lines = describe(caps, skipped);
+  const label = element("renderer");
+  label.textContent = `${backendName(caps.backend)} · ${caps.adapter}`;
+  label.title = lines.join("\n");
+  console.info(`Vibe Fishtank\n${lines.join("\n")}`);
+  console.debug(`${backendName(caps.backend)} features:`, caps.features);
 }
+
+start().catch((error: unknown) => {
+  console.error(error);
+  showError(
+    "The aquarium needs WebGPU or WebGL2, and couldn't start either on this browser's graphics hardware.",
+  );
+});
