@@ -2,6 +2,7 @@
 
 import { OrbitCamera } from "./camera";
 import { backendName, createRenderer, describe, preferredBackend, type Device } from "./lib/gpu";
+import { ResolutionController } from "./resolution";
 import { clamp, lerp3, lookAt, multiply, ortho, rayBox, type Vec3 } from "./lib/math";
 import { Caustics } from "./scene/caustics";
 import {
@@ -105,11 +106,11 @@ async function start(): Promise<void> {
 
   element("census").textContent = SPECIES.map((s) => `${s.count} ${s.name}`).join(" · ");
 
-  // Rendering at reduced resolution is the first thing to give on slower machines.
-  let resolutionScale = 1;
-  let slowFrames = 0;
+  // Rendering at reduced resolution is the first thing to give on slower
+  // machines, and the last thing to take back once they recover.
+  const resolution = new ResolutionController();
   const resize = (): void => {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2) * resolutionScale;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * resolution.value;
     const width = Math.max(2, Math.round(canvas.clientWidth * dpr));
     const height = Math.max(2, Math.round(canvas.clientHeight * dpr));
     if (canvas.width !== width || canvas.height !== height) {
@@ -119,6 +120,18 @@ async function start(): Promise<void> {
     post.resize(width, height);
   };
   new ResizeObserver(resize).observe(canvas);
+  // Moving between screens can change the device pixel ratio without any
+  // client-size change, which the ResizeObserver never sees. Re-arm the
+  // resolution media query after each change to catch the next one.
+  const watchDpr = (): void => {
+    const query = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    query.addEventListener("change", function onDprChange() {
+      query.removeEventListener("change", onDprChange);
+      resize();
+      watchDpr();
+    });
+  };
+  watchDpr();
   resize();
 
   let nightTarget = 0;
@@ -132,16 +145,10 @@ async function start(): Promise<void> {
     const dt = clamp(frameMs / 1000, 0.001, 0.05);
     time += dt;
 
-    if (frameMs > 34 && frameMs < 250) slowFrames += 1;
-    else slowFrames = Math.max(0, slowFrames - 0.5);
-    if (slowFrames > 75 && resolutionScale > 0.55) {
-      resolutionScale *= 0.8;
-      slowFrames = 0;
-      resize();
-    }
+    if (resolution.step(frameMs)) resize();
 
     night += (nightTarget - night) * (1 - Math.exp(-dt * 1.4));
-    school.update(dt);
+    school.update(dt, night);
     camera.update(dt, canvas.clientWidth / Math.max(canvas.clientHeight, 1));
     fish.update(school.fish);
     particles.update(dt, school.food, camera.right, camera.up);
