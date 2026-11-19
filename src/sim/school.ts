@@ -131,7 +131,10 @@ export interface Fish {
   scale: number;
   variation: number;
   seed: number;
+  /** Seconds until this fish is hungry again after eating. */
   fed: number;
+  /** The flake this fish is hunting this frame, or null. */
+  target: Food | null;
 }
 
 export interface Food {
@@ -141,12 +144,18 @@ export interface Food {
   vy: number;
   drift: number;
   age: number;
+  /** How many fish are currently hunting this flake. */
+  claims: number;
 }
 
 const MARGIN = 0.14;
 const FOOD_SINK = 0.12;
 const FOOD_LIFE = 45;
 const MAX_FOOD = 80;
+/** A fish ignores food for this long after eating, so drops feed the crowd. */
+const SATIATION = 1.5;
+/** Each flake draws at most this many hunters; the rest spread out. */
+const CLAIMS_PER_FLAKE = 2;
 
 export class School {
   readonly fish: Fish[] = [];
@@ -155,6 +164,8 @@ export class School {
   private startleTime = 0;
   private startlePoint: Vec3 = [0, 0, 0];
   private time = 0;
+  /** The current night blend, 0 in daylight and 1 in moonlight. */
+  private night = 0;
   private readonly rng = createRng(90210);
 
   constructor() {
@@ -191,6 +202,7 @@ export class School {
           variation: rng(),
           seed: rng() * 100,
           fed: 0,
+          target: null,
         });
       }
     });
@@ -206,6 +218,7 @@ export class School {
         vy: 0,
         drift: rng() * 6.28,
         age: -rng() * 0.6,
+        claims: 0,
       });
     }
   }
@@ -215,10 +228,13 @@ export class School {
     this.startlePoint = point;
   }
 
-  update(dt: number): void {
+  /** A night blend of 1 slows the fish and schools them tighter, as in moonlight. */
+  update(dt: number, night = 0): void {
     this.time += dt;
+    this.night = night;
     this.startleTime = Math.max(0, this.startleTime - dt);
     this.updateFood(dt);
+    this.assignClaims();
     for (const fish of this.fish) this.steer(fish, dt);
     for (const fish of this.fish) this.integrate(fish, dt);
   }
@@ -279,17 +295,20 @@ export class School {
       }
     }
     if (neighbours > 0) {
-      ax += (sumX / neighbours) * def.cohesion;
-      ay += (sumY / neighbours) * def.cohesion;
-      az += (sumZ / neighbours) * def.cohesion;
+      // Darkness gathers the school: fish school tighter at night.
+      const cohesion = def.cohesion * (1 + 0.6 * this.night);
+      ax += (sumX / neighbours) * cohesion;
+      ay += (sumY / neighbours) * cohesion;
+      az += (sumZ / neighbours) * cohesion;
       ax += (alignX / neighbours - fish.vx) * def.alignment;
       ay += (alignY / neighbours - fish.vy) * def.alignment;
       az += (alignZ / neighbours - fish.vz) * def.alignment;
     }
 
-    // Wandering, so that a school never settles into a fixed orbit.
+    // Wandering, so that a school never settles into a fixed orbit. It fades at
+    // night, when real fish keep close to their kind.
     const t = this.time * 0.31 + fish.seed;
-    const wander = 0.2 * def.cruise * 5;
+    const wander = 0.2 * def.cruise * 5 * (1 - 0.6 * this.night);
     ax += Math.sin(t * 1.3) * Math.cos(t * 0.47) * wander;
     az += Math.cos(t * 0.9 + 1.7) * Math.sin(t * 0.61) * wander * 0.7;
     ay += Math.sin(t * 1.9 + 3.1) * wander * 0.22;
@@ -328,18 +347,26 @@ export class School {
       }
     }
 
-    // Food beats everything else except an actual scare.
+    // Food beats everything else except an actual scare. A fish that has just
+    // eaten stands down while its satiation lasts, and each flake draws at
+    // most CLAIMS_PER_FLAKE hunters, so a drop feeds the whole school
+    // instead of one piling crowd.
     let targetSpeed = def.cruise;
-    const closest = this.nearestFood(fish);
-    if (closest) {
-      const dx = closest.x - fish.x;
-      const dy = closest.y - fish.y;
-      const dz = closest.z - fish.z;
+    const target = fish.target !== null && this.food.includes(fish.target) ? fish.target : null;
+    if (fish.fed > 0 || target === null) {
+      // Unhurried fish drift, then pick up pace again. At night they cruise slower.
+      const pace = 0.5 + 0.5 * Math.sin(this.time * 0.22 + fish.seed * 2.3);
+      targetSpeed = def.cruise * (def.idle + (1 - def.idle) * pace * pace * 1.6);
+      if (this.night > 0) targetSpeed *= 1 - 0.35 * this.night;
+    } else {
+      const dx = target.x - fish.x;
+      const dy = target.y - fish.y;
+      const dz = target.z - fish.z;
       const d = Math.hypot(dx, dy, dz) || 1;
       const eatRange = Math.max(0.03, fish.scale * 0.45);
       if (d < eatRange) {
-        this.food.splice(this.food.indexOf(closest), 1);
-        fish.fed = 1.5;
+        this.food.splice(this.food.indexOf(target), 1);
+        fish.fed = SATIATION;
       } else {
         const hunger = 2.6;
         ax += (dx / d) * hunger * def.maxSpeed * 2;
@@ -347,10 +374,6 @@ export class School {
         az += (dz / d) * hunger * def.maxSpeed * 2;
         targetSpeed = def.maxSpeed * 0.8;
       }
-    } else {
-      // Unhurried fish drift, then pick up pace again.
-      const pace = 0.5 + 0.5 * Math.sin(this.time * 0.22 + fish.seed * 2.3);
-      targetSpeed = def.cruise * (def.idle + (1 - def.idle) * pace * pace * 1.6);
     }
 
     if (this.startleTime > 0) {
@@ -382,15 +405,31 @@ export class School {
 
     // Fish rarely swim steeply, and a nearly vertical heading looks wrong.
     const horizontal = Math.hypot(fish.vx, fish.vz);
-    const maxClimb = Math.max(horizontal * 0.55, closest ? 0.14 : 0.05);
+    const maxClimb = Math.max(horizontal * 0.55, target !== null ? 0.14 : 0.05);
     fish.vy = clamp(fish.vy, -maxClimb, maxClimb);
   }
 
-  private nearestFood(fish: Fish): Food | null {
+  /** Gives each hungry fish a flake to hunt, spreading hunters across the drop. */
+  private assignClaims(): void {
+    for (const flake of this.food) flake.claims = 0;
+    for (const fish of this.fish) {
+      fish.target = null;
+      if (fish.fed > 0) continue;
+      const flake = this.nearestFreeFood(fish);
+      if (flake !== null) {
+        flake.claims++;
+        fish.target = flake;
+      }
+    }
+  }
+
+  private nearestFreeFood(fish: Fish): Food | null {
     let best: Food | null = null;
     let bestDist = fish.def.bottom ? 0.7 : 1.1;
     for (const f of this.food) {
       if (f.age < 0) continue;
+      // Fully claimed flakes are left for the fish already on them.
+      if (f.claims >= CLAIMS_PER_FLAKE) continue;
       // Bottom dwellers can only reach what has already sunk.
       if (fish.def.bottom && f.y > 0.34) continue;
       const d = Math.hypot(f.x - fish.x, f.y - fish.y, f.z - fish.z);

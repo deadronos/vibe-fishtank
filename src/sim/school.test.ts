@@ -6,9 +6,9 @@ import { School, SPECIES, type Fish, type Food } from "./school";
 
 const DT = 1 / 60;
 
-function run(school: School, seconds: number, each?: () => void): void {
+function run(school: School, seconds: number, each?: () => void, night = 0): void {
   for (let t = 0; t < seconds; t += DT) {
-    school.update(DT);
+    school.update(DT, night);
     each?.();
   }
 }
@@ -157,6 +157,60 @@ describe("School", () => {
         }
       });
     });
+
+    it("spreads hunters across a drop, at most two per flake", () => {
+      const school = new School();
+      run(school, 1);
+      school.dropFood(0, 0, 20);
+      let widest = 0;
+      run(school, 3, () => {
+        let claimed = 0;
+        for (const flake of school.food) {
+          expect(flake.claims).toBeLessThanOrEqual(2);
+          if (flake.claims > 0) claimed++;
+        }
+        widest = Math.max(widest, claimed);
+      });
+      // Not one crowd on one flake: several flakes have their own hunters.
+      expect(widest).toBeGreaterThanOrEqual(4);
+    });
+
+    it("stands a fish down from the food while its satiation lasts", () => {
+      const school = new School();
+      run(school, 1);
+      school.dropFood(0, 0, 1);
+      let steps = 0;
+      while (school.food.length > 0 && steps++ < 900) school.update(DT);
+      const eater = school.fish.find((f) => f.fed > 0);
+      expect(eater).toBeDefined();
+      // A fresh flake lands on the feeding spot; the fed fish leaves it alone.
+      school.dropFood(eater!.x, eater!.z, 1);
+      while (eater!.fed > 0) {
+        school.update(DT);
+        expect(eater!.target).toBeNull();
+      }
+    });
+  });
+
+  it("slows the fish and gathers the school in moonlight", () => {
+    const day = new School();
+    const nightSchool = new School();
+    run(day, 15);
+    run(nightSchool, 15, undefined, 1);
+    const meanSpeed = (school: School): number =>
+      mean(school.fish.map((f) => Math.hypot(f.vx, f.vy, f.vz)));
+    expect(meanSpeed(nightSchool)).toBeLessThan(meanSpeed(day));
+    // Tetras cluster tighter around their school's centre at night.
+    const spread = (school: School): number => {
+      const tetras = school.fish.filter((f) => f.species === 0);
+      const centre = [
+        mean(tetras.map((f) => f.x)),
+        mean(tetras.map((f) => f.y)),
+        mean(tetras.map((f) => f.z)),
+      ];
+      return mean(tetras.map((f) => Math.hypot(f.x - centre[0], f.y - centre[1], f.z - centre[2])));
+    };
+    expect(spread(nightSchool)).toBeLessThan(spread(day));
   });
 
   it("scatters fish away from a startle", () => {
