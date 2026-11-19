@@ -11,8 +11,9 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm build` typechecks and produces a static site in `dist/`. `pnpm check` runs the typecheck,
-oxlint and oxfmt. The only dependencies are dev tools: TypeScript 7, Vite, oxlint and oxfmt.
+`pnpm build` typechecks and produces a static site in `dist/`. `pnpm test` runs the unit tests
+over the numerical core and the fish simulation, and `pnpm check` runs the typecheck, oxlint, oxfmt
+and the tests. The only dependencies are dev tools: TypeScript 7, Vite, vitest, oxlint and oxfmt.
 
 ## Release
 
