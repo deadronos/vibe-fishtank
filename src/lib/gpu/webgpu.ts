@@ -214,7 +214,8 @@ class WGPUPipeline implements Pipeline {
             ],
           }
         : undefined,
-      primitive: { topology: "triangle-list", cullMode: "none" },
+      // Front faces are CCW by default in both backends, matching MeshBuilder's boxes.
+      primitive: { topology: "triangle-list", cullMode: desc.cull ? "back" : "none" },
       depthStencil: desc.depth
         ? {
             format: DEPTH_FORMAT,

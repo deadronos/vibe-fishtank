@@ -283,6 +283,12 @@ class GLPass implements Pass {
     }
     if (desc.alphaToCoverage) gl.enable(gl.SAMPLE_ALPHA_TO_COVERAGE);
     else gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+    const cull = desc.cull === true;
+    if (cull !== this.device.culling) {
+      if (cull) gl.enable(gl.CULL_FACE);
+      else gl.disable(gl.CULL_FACE);
+      this.device.culling = cull;
+    }
 
     const { frame, params, textures } = bindings;
     if (frame) gl.bindBufferRange(gl.UNIFORM_BUFFER, FRAME_BINDING, ring, frame.offset, frame.size);
@@ -324,6 +330,8 @@ export class WebGL2Device implements Device {
   readonly caps: Capabilities;
   readonly ring: WebGLBuffer;
   readonly anisotropic: EXT_texture_filter_anisotropic | null;
+  /** Whether back-face culling is on, tracked so consecutive draws skip redundant GL calls. */
+  culling = false;
   private readonly canvas: HTMLCanvasElement;
   private readonly align: number;
   private readonly framebuffers = new Map<string, { fbo: WebGLFramebuffer; ids: number[] }>();
@@ -334,6 +342,8 @@ export class WebGL2Device implements Device {
     this.canvas = canvas;
     this.gl = gl;
     gl.disable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
 
     const features = gl.getSupportedExtensions() ?? [];
     const used: string[] = [];

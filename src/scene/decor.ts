@@ -170,19 +170,28 @@ export class Decor implements Drawable {
   private readonly pipeline: Pipeline;
   private readonly shadow: Pipeline;
   private readonly mesh: Mesh;
+  private readonly woodPipeline: Pipeline;
+  private readonly woodShadow: Pipeline;
+  private readonly wood: Mesh;
 
   constructor(device: Device, targets: SceneTargets) {
     const source = shader(VS, FS, WGSL);
-    this.pipeline = scenePipeline(device, targets, "decor", source);
-    this.shadow = shadowPipeline(device, "decor", source);
+    // Stones and pebbles are closed icospheres wound counter-clockwise from outside, so their
+    // hidden back faces are culled in both passes. The driftwood tubes are open-ended and wound
+    // the other way, so they keep an unculled pipeline of their own.
+    this.pipeline = scenePipeline(device, targets, "decor rock", source, { cull: true });
+    this.shadow = shadowPipeline(device, "decor rock", source, { cull: true });
+    this.woodPipeline = scenePipeline(device, targets, "decor wood", source);
+    this.woodShadow = shadowPipeline(device, "decor wood", source);
 
-    const builder = new MeshBuilder();
+    const rockBuilder = new MeshBuilder();
     const rock = icosphere(4);
     for (const stone of STONES) {
       const base: Vec3 = [stone.x, sandHeight(stone.x, stone.z) - 0.015, stone.z];
-      addStone(builder, rock, base, stone.radius, stone.height, stone.seed);
+      addStone(rockBuilder, rock, base, stone.radius, stone.height, stone.seed);
     }
 
+    const woodBuilder = new MeshBuilder();
     DRIFTWOOD.forEach((branch, index) => {
       const points = catmull(branch, 7);
       const start = index === 0 ? 0.05 : 0.028;
@@ -191,7 +200,7 @@ export class Decor implements Drawable {
         const knots = 1 + 0.16 * fbm3(point[0] * 12, point[1] * 12, point[2] * 12, 2);
         return mix(start, 0.006, Math.pow(t, 0.8)) * knots;
       });
-      builder.tube(points, radii, 10, WOOD);
+      woodBuilder.tube(points, radii, 10, WOOD);
     });
 
     const rng = createRng(1729);
@@ -208,13 +217,15 @@ export class Decor implements Drawable {
         y + d[1] * size * 0.65,
         z + d[2] * size * stretch,
       ]);
-      builder.smooth(positions, pebble.indices, PEBBLE);
+      rockBuilder.smooth(positions, pebble.indices, PEBBLE);
     }
 
-    this.mesh = device.createMesh(builder.build());
+    this.mesh = device.createMesh(rockBuilder.build());
+    this.wood = device.createMesh(woodBuilder.build());
   }
 
   draw({ pass, frame, water, shadow }: DrawContext): void {
     pass.draw(shadow ? this.shadow : this.pipeline, this.mesh, { frame, textures: water });
+    pass.draw(shadow ? this.woodShadow : this.woodPipeline, this.wood, { frame, textures: water });
   }
 }

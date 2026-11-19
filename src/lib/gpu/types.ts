@@ -101,6 +101,12 @@ export interface PipelineDesc {
   samples?: number;
   blend?: Blend;
   alphaToCoverage?: boolean;
+  /**
+   * Drops back-facing triangles, the ones wound clockwise on screen. The mesh must be wound
+   * counter-clockwise seen from outside, and open meshes must not opt in: their back faces can
+   * be their visible side.
+   */
+  cull?: boolean;
 }
 
 export interface Pipeline {
