@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Vec3 } from "../lib/math";
-import { TANK } from "../scene/common";
-import { sandHeight } from "../scene/layout";
+import { sandHeight, TANK } from "../world";
 import { School, SPECIES, type Fish, type Food } from "./school";
 
 const DT = 1 / 60;

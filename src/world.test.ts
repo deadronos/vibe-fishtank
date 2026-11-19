@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TANK } from "./common";
-import { createObstacles, DRIFTWOOD, sandHeight, STONES, stoneClearance } from "./layout";
+import { createObstacles, DRIFTWOOD, sandHeight, STONES, stoneClearance, TANK } from "./world";
 
 const grid = (n: number): [number, number][] => {
   const points: [number, number][] = [];

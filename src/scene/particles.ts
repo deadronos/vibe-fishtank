@@ -17,7 +17,7 @@ import {
   type Drawable,
   type SceneTargets,
 } from "./common";
-import { sandHeight } from "./layout";
+import { sandHeight } from "../world";
 
 const KIND_DUST = 0;
 const KIND_BUBBLE = 1;

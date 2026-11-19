@@ -105,6 +105,8 @@ gh api -X POST repos/deadronos/vibe-fishtank/environments/github-pages/deploymen
     resolve.
   - `index.ts` picks between them and falls back on failure.
 - `src/lib`: also math, seeded noise and a procedural mesh builder.
+- `src/world.ts`: the tank's dimensions and its aquascape — where the sand rises, and where the
+  stones and driftwood sit — shared by the simulation and the scene.
 - `src/sim/school.ts`: per-species boids, with walls, obstacles, food and startles.
 - `src/scene`: the aquascape and its materials. Each material carries its shaders in GLSL and
   WGSL.

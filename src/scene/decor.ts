@@ -19,7 +19,7 @@ import {
   type Drawable,
   type SceneTargets,
 } from "./common";
-import { DRIFTWOOD, sandHeight, STONES, stoneClearance } from "./layout";
+import { DRIFTWOOD, sandHeight, STONES, stoneClearance } from "../world";
 
 const STONE = 0;
 const WOOD = 1;

@@ -2,8 +2,7 @@
 
 import { clamp, type Vec3 } from "../lib/math";
 import { createRng } from "../lib/noise";
-import { TANK } from "../scene/common";
-import { createObstacles, sandHeight, type Obstacle } from "../scene/layout";
+import { createObstacles, sandHeight, TANK, type Obstacle } from "../world";
 
 export interface SpeciesDef {
   name: string;

@@ -20,7 +20,7 @@ export default mergeConfig(
           "src/lib/gpu/webgl2.ts",
           "src/lib/gpu/webgpu.ts",
           "src/lib/gpu/types.ts",
-          "src/scene/!(layout).ts",
+          "src/scene/*.ts",
         ],
         reporter: ["text", "html", "lcov"],
         thresholds: { lines: 90, functions: 90, branches: 85, statements: 90 },
