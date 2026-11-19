@@ -136,4 +136,28 @@ describe("rayBox", () => {
     expect(hit?.near).toBeCloseTo(4);
     expect(hit?.far).toBeCloseTo(6);
   });
+
+  it("enters a flat slab through its near face", () => {
+    // Like the water volume seen from above: the ray reaches the top plane first.
+    const hit = rayBox([0.5, 5, 0], [0, -1, 0], [-1, 0, -1], [1, 0.1, 1]);
+    expect(hit?.near).toBeCloseTo(4.9);
+    expect(hit?.far).toBeCloseTo(5);
+  });
+});
+
+describe("picking", () => {
+  const eye: Vec3 = [0, 0.5, 3];
+  const viewProj = multiply(
+    perspective((34 * Math.PI) / 180, 1.5, 0.1, 40),
+    lookAt(eye, [0, 0.5, 0], [0, 1, 0]),
+  );
+
+  it("reconstructs the ray through a clicked world point, as main.ts does", () => {
+    const world: Vec3 = [0.25, 0.9, -0.4];
+    const ndc = transformPoint(viewProj, world);
+    const onFarPlane = transformPoint(invert(viewProj), [ndc[0], ndc[1], 1]);
+    // The reconstructed point lies on the ray from the eye through the original.
+    expectVecClose(cross(sub(onFarPlane, eye), sub(world, eye)), [0, 0, 0], 4);
+    expect(dot(sub(onFarPlane, eye), sub(world, eye))).toBeGreaterThan(0);
+  });
 });

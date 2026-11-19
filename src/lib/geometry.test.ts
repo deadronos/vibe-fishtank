@@ -116,6 +116,26 @@ describe("MeshBuilder", () => {
 });
 
 describe("icosphere", () => {
+  it.each([0, 2])("is a closed, crack-free manifold at subdivision %i", (level) => {
+    const { positions, indices } = icosphere(level);
+    const faces = indices.length / 3;
+    const edges = new Map<number, number>();
+    for (let i = 0; i < indices.length; i += 3) {
+      for (const [a, b] of [
+        [indices[i], indices[i + 1]],
+        [indices[i + 1], indices[i + 2]],
+        [indices[i + 2], indices[i]],
+      ]) {
+        const key = Math.min(a, b) * positions.length + Math.max(a, b);
+        edges.set(key, (edges.get(key) ?? 0) + 1);
+      }
+    }
+    // Every edge shared by exactly two faces: no cracks or duplicated walls.
+    for (const count of edges.values()) expect(count).toBe(2);
+    // Euler characteristic of a sphere.
+    expect(positions.length - edges.size + faces).toBe(2);
+  });
+
   it.each([0, 1, 2, 3])("has the expected counts at subdivision %i", (level) => {
     const { positions, indices } = icosphere(level);
     const faces = 20 * 4 ** level;

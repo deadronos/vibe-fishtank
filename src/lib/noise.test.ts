@@ -4,6 +4,28 @@ import { createRng, fbm3, noise3 } from "./noise";
 const take = (rng: () => number, n: number): number[] => Array.from({ length: n }, rng);
 
 describe("createRng", () => {
+  // Fixed seeds build the world — the fish scatter, food drops, pebble fields
+  // and plant placement all derive from them — so a changed sequence silently
+  // regenerates the aquascape. Pin the outputs; change them only on purpose.
+  it("produces the documented sequence for a given seed", () => {
+    expect(take(createRng(0), 6).map((v) => v.toFixed(12))).toEqual([
+      "0.266429208685",
+      "0.000329745701",
+      "0.223272027448",
+      "0.146202147938",
+      "0.467327822931",
+      "0.545049082721",
+    ]);
+    expect(take(createRng(90210), 6).map((v) => v.toFixed(12))).toEqual([
+      "0.281729944982",
+      "0.736178235151",
+      "0.921530475374",
+      "0.171728212619",
+      "0.761466322932",
+      "0.374760675011",
+    ]);
+  });
+
   it("repeats the same sequence for the same seed", () => {
     expect(take(createRng(42), 20)).toEqual(take(createRng(42), 20));
   });

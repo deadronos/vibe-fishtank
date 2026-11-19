@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Vec3 } from "../lib/math";
 import { TANK } from "../scene/common";
 import { sandHeight } from "../scene/layout";
-import { School, SPECIES, type Fish } from "./school";
+import { School, SPECIES, type Fish, type Food } from "./school";
 
 const DT = 1 / 60;
 
@@ -33,6 +33,32 @@ describe("School", () => {
     expect(a.fish).toEqual(b.fish);
   });
 
+  it("stays deterministic with food in the water and over a long run", () => {
+    const a = new School();
+    const b = new School();
+    a.dropFood(0.2, 0.1, 5);
+    b.dropFood(0.2, 0.1, 5);
+    run(a, 10);
+    run(b, 10);
+    expect(a.fish).toEqual(b.fish);
+    expect(a.food).toEqual(b.food);
+  });
+
+  it("keeps every fish strictly inside the glass through a minute of taps", () => {
+    const school = new School();
+    let step = 0;
+    run(school, 60, () => {
+      // A tap every five seconds keeps bursting fish into the walls.
+      if (step++ % Math.round(5 / DT) === 0) school.startle([0, 0.7, TANK.halfZ]);
+      for (const f of school.fish) {
+        expect(Math.abs(f.x)).toBeLessThan(TANK.halfX);
+        expect(Math.abs(f.z)).toBeLessThan(TANK.halfZ);
+        expect(f.y).toBeGreaterThan(sandHeight(f.x, f.z));
+        expect(f.y).toBeLessThan(TANK.water);
+      }
+    });
+  });
+
   it("keeps every fish inside the water, at a sane speed, with a valid orientation", () => {
     const school = new School();
     school.dropFood(0.4, 0);
@@ -51,6 +77,8 @@ describe("School", () => {
       expect(Math.hypot(f.ux, f.uy, f.uz)).toBeCloseTo(1);
       // The up vector is kept perpendicular to the heading.
       expect(f.ux * f.fx + f.uy * f.fy + f.uz * f.fz).toBeCloseTo(0);
+      expect(f.turn).toBeGreaterThanOrEqual(-1);
+      expect(f.turn).toBeLessThanOrEqual(1);
       expect(Number.isFinite(f.phase)).toBe(true);
     }
   });
@@ -111,6 +139,23 @@ describe("School", () => {
       for (const f of school.food) expect(f.y).toBeLessThan(TANK.water - 0.5);
       run(school, 40);
       expect(school.food).toHaveLength(0);
+    });
+
+    it("only ever sinks, and never below the substrate or out of the tank", () => {
+      const school = new School();
+      run(school, 1);
+      school.dropFood(0.5, 0.1, 80);
+      const lastY = new Map<Food, number>();
+      run(school, 8, () => {
+        for (const flake of school.food) {
+          const previous = lastY.get(flake);
+          if (previous !== undefined) expect(flake.y).toBeLessThanOrEqual(previous + 1e-12);
+          lastY.set(flake, flake.y);
+          expect(flake.y).toBeGreaterThanOrEqual(sandHeight(flake.x, flake.z) + 0.006 - 1e-9);
+          expect(Math.abs(flake.x)).toBeLessThan(TANK.halfX);
+          expect(Math.abs(flake.z)).toBeLessThan(TANK.halfZ);
+        }
+      });
     });
   });
 
